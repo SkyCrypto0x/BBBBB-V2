@@ -3,8 +3,8 @@
   "version": "1.0.0",
   "main": "dist/index.js",
   "engines": {
-  "node": ">=18 <23"
-},
+    "node": ">=18 <23"
+  },
   "license": "ISC",
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
@@ -12,7 +12,7 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "dotenv": "^16.4.0",
+    "dotenv": "^16.6.1",
     "ethers": "5.7.2",
     "node-fetch": "2.6.9",
     "telegraf": "^4.16.3"
