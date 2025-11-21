@@ -51,17 +51,26 @@ const chains: Record<ChainId, ChainConfig> = {
 
 export const appConfig: AppConfig = {
   telegramBotToken:
-    process.env.TELEGRAM_BOT_TOKEN || rawJson.telegramBotToken || "",
-  botUsername: process.env.BOT_USERNAME || rawJson.botUsername || "",
+    process.env.TELEGRAM_BOT_TOKEN ||
+    process.env.BOT_TOKEN ||
+    rawJson.telegramBotToken ||
+    "",
+
+  botUsername:
+    process.env.BOT_USERNAME ||
+    rawJson.botUsername ||
+    "",
+
   defaultChain:
     (process.env.DEFAULT_CHAIN as ChainId | undefined) ||
     (rawJson.defaultChain as ChainId | undefined) ||
     "bsc",
+
   chains
 };
 
 if (!appConfig.telegramBotToken) {
   throw new Error(
-    "Missing TELEGRAM_BOT_TOKEN. Put it in .env (config.json-এ রাখা safe না)."
+    "Missing TELEGRAM_BOT_TOKEN! Railway Variables e add koro → Key: TELEGRAM_BOT_TOKEN"
   );
 }
