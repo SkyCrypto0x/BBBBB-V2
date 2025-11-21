@@ -83,7 +83,7 @@ export function registerBuyBotFeature(bot: Telegraf<BotCtx>) {
       await ctx.reply(
         "🕵️ <b>Premium Buy Bot Setup</b>\n\n" +
           "1️⃣ Send your <b>token contract address</b>\n" +
-          "I'll auto-detect <u>all pools</u> from DexScreener and pick the main one.",
+          "I'll auto-detect <u>all pools</u> and pick the main one.",
         { parse_mode: "HTML" }
       );
       return;
@@ -151,7 +151,7 @@ export function registerBuyBotFeature(bot: Telegraf<BotCtx>) {
     await ctx.reply(
       "🕵️ <b>Group Setup Mode</b>\n\n" +
         "1️⃣ Reply with your <b>token contract address</b>.\n" +
-        "I'll auto-detect all pools from DexScreener.",
+        "I'll auto-detect all pools...",
       { parse_mode: "HTML" }
     );
 
@@ -311,10 +311,10 @@ async function handleAddCommand(ctx: Context) {
     groupSetupStates.delete(groupId);
 
     const text =
-      "🕵️ <b>Premium Buy Bot Setup</b>\n\n" +
-      "Choose how you want to configure:\n\n" +
-      "• <b>Set up in DM</b> – full wizard in private chat (recommended)\n" +
-      "• <b>Set up here</b> – answer questions directly in this group";
+      "🕵️ <b>Premium Buy Bot Setup</b> 🕵️\n\n" +
+      "Choose how you want to configure: 👇🏻\n\n" +
+      "• <b>Set up in DM</b> – full wizard in private chat \n" +
+      "• <b>Set up here</b> – answer questions directly in this group (recommended)";
 
     await ctx.reply(text, {
       parse_mode: "HTML",
@@ -503,7 +503,7 @@ async function runSetupStep(
 
       const chain = state.settings.chain || appConfig.defaultChain;
 
-      await ctx.reply("🔎 Fetching pools from DexScreener…");
+      await ctx.reply("🔎 Fetching pools.…");
 
       const pairs = await fetchTokenPairs(chain, tokenAddr);
       if (!pairs.length) {
@@ -524,7 +524,7 @@ async function runSetupStep(
       (state.settings as any).allPairAddresses = allAddresses;
 
       let summary =
-        `✅ Found <b>${sorted.length}</b> pools on DexScreener.\n\n` +
+        `✅ Found <b>${sorted.length}</b> pools on chain \n\n` +
         `<b>Main pair:</b>\n<code>${main.pairAddress}</code>\n\n`;
 
       if (sorted.length > 1) {
@@ -532,11 +532,11 @@ async function runSetupStep(
           .slice(1, 4)
           .map((p) => `• ${p.pairAddress}`)
           .join("\n");
-        summary += `<b>Other pools (top liq):</b>\n${others}\n\n`;
+        summary += `<b>Other pools (top liq):</b>\n\n${others}\n\n`;
       }
 
       await ctx.reply(
-        summary + "3️⃣ Now send a <b>buy emoji</b> (e.g. 🐶, 🧠, 🚀).",
+        summary + "3️⃣ <b>Now send a buy emoji</b> (e.g. 🐶, 🧠, 🚀).",
         {
           parse_mode: "HTML"
         }
