@@ -746,9 +746,9 @@ async function sendGroupHelp(ctx: Context) {
       parse_mode: "HTML",
       reply_markup: {
         inline_keyboard: [
-          [{ text: "⚙️ Configure Token (/add)", callback_data: "cmd_add" }],
-          [{ text: "🧪 Preview Alert (/testbuy 250)", callback_data: "cmd_testbuy" }],
-          [{ text: "🛑 Stop Alerts (/stop)", callback_data: "cmd_stop" }]
+          [{ text: "⚙️ Add Token", callback_data: "cmd_add" }],
+          [{ text: "🧪 Preview Alert", callback_data: "cmd_testbuy" }],
+          [{ text: "🛑 Stop Alerts", callback_data: "cmd_stop" }]
         ]
       }
     }

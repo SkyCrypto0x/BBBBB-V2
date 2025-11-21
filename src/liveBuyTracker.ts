@@ -460,6 +460,23 @@ function shorten(addr: string, len = 6): string {
   return `${addr.slice(0, len)}...${addr.slice(-len + 2)}`;
 }
 
+function formatCompactUsd(value: number): string {
+  if (value >= 1_000_000) {
+    const m = value / 1_000_000;
+    const s = m.toFixed(2);
+    // 1.00M -> 1M
+    return (s.endsWith(".00") ? s.slice(0, -3) : s) + "M";
+  }
+  if (value >= 1_000) {
+    const k = Math.round(value / 1_000);
+    return `${k}K`;
+  }
+  return value.toFixed(0);
+}
+
+/* ========= Extra helpers ========= */
+
+
 async function sendPremiumBuyAlert(
   bot: Telegraf,
   groupId: number,
@@ -553,12 +570,11 @@ async function sendPremiumBuyAlert(
   } catch {
     // ignore
   }
-  const lpText =
-    mainPairLp > 0 ? (mainPairLp / 1_000_000).toFixed(2) : "0.00";
+  const lpText = formatCompactUsd(mainPairLp);
 
   const whaleLoadLine =
     positionIncrease !== null && positionIncrease > 500
-      ? "🚀 <b>WHALE LOADING HEAVILY!</b> 🚀\n"
+      ? "    🚀 <b>WHALE LOADING!</b> 🚀    \n"
       : "";
 
   const volumeLine = `🔥 Volume (24h): $${volume24h >= 1_000_000
@@ -567,14 +583,19 @@ async function sendPremiumBuyAlert(
 
   const headerLine =
     buyUsd >= 5000
-      ? "🐳🐳🐳 <b>WHALE INCOMING!!!</b> 🐳🐳🐳"
+      ? "    🐳 <b>WHALE INCOMING!!!</b> 🐳    "
       : buyUsd >= 3000
-      ? "🚨🚨🚨 <b>BIG BUY DETECTED!</b> 🚨🚨🚨"
+      ? "  🚨🚨 <b>BIG BUY DETECTED!</b> 🚨🚨  "
       : buyUsd >= 1000
-      ? "🟢🟢🟢 <b>Strong Buy</b> 🟢🟢🟢"
-      : "🟢 <b>New Buy</b> 🟢";
+      ? "  🟢🟢🟢 <b>Strong Buy</b> 🟢🟢🟢  "
+      : "     🟢 <b>New Buy</b> 🟢     ";
 
-  const message = `
+  const dexScreenerUrl = `https://dexscreener.com/${chain}/${settings.pairAddress}`;
+const dexToolsUrl = `https://www.dextools.io/app/${
+  chainStr === "bsc" ? "bsc" : "ether"
+}/pair-explorer/${settings.pairAddress}`;
+
+const message = `
 ${headerLine}
 ${whaleLoadLine}
 💰 <b>$${buyUsd.toLocaleString()}</b> ${safeTokenSymbol} BUY
@@ -585,12 +606,9 @@ ${baseEmoji} <b>${baseSymbolText}:</b> ${baseAmount.toFixed(
   )} ($${buyUsd.toLocaleString()})
 💳 ${safeTokenSymbol}: ${Math.round(tokenAmount)
     .toString()
-    .replace(/\\B(?=(\\d{3})+(?!\\d))/g, ",")}
+    .replace(/\B(?=(\d{3})+(?!\d))/g, ",")}
 
-🔗 Pair: <a href="${pairLink}">${shorten(
-    pairAddress,
-    10
-  )}</a> → $${lpText}M LP
+🔗 Pair: <a href="${pairLink}">View Pair</a> → $${lpText} LP
 
 👤 Buyer: <a href="${addrUrl}">${safeBuyer}</a>
 🔶 <a href="${txUrl}">View Transaction</a>
@@ -600,30 +618,29 @@ ${
     : ""
 }📊 MC: $${mcText}M
 ${volumeLine}
-  `.trim();
 
-  const dexScreenerUrl = `https://dexscreener.com/${chain}/${settings.pairAddress}`;
-  const dexToolsUrl = `https://www.dextools.io/app/${
-    chainStr === "bsc" ? "bsc" : "ether"
-  }/pair-explorer/${settings.pairAddress}`;
+🔗 <a href="${dexToolsUrl}">DexT</a> | <a href="${dexScreenerUrl}">DexS</a> | <a href="https://t.me/trending">Trending</a>
+`.trim();
+
+
+    const row: any[] = [];
+
+  if (settings.tgGroupLink) {
+    row.push({
+      text: "👥 Join Token Group",
+      url: settings.tgGroupLink
+    });
+  }
+
+  row.push({
+    text: "✉️ DM for Promo",
+    url: "https://t.me/yourusername" 
+  });
 
   const keyboard: any = {
-    inline_keyboard: [
-      [
-        { text: "🦅 DexScreener", url: dexScreenerUrl },
-        { text: "📈 DexTools", url: dexToolsUrl }
-      ],
-      settings.tgGroupLink
-        ? [{ text: "👥 Join Alpha Group", url: settings.tgGroupLink }]
-        : [],
-      [
-        {
-          text: "✉️ DM for Access",
-          url: "https://t.me/yourusername"
-        }
-      ]
-    ].filter((row: any[]) => row.length > 0)
+    inline_keyboard: [row]
   };
+
 
   try {
     if (settings.animationFileId) {
