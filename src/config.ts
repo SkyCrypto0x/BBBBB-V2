@@ -1,6 +1,7 @@
 import { readFileSync } from "fs";
 import path from "path";
-import "dotenv/config";
+import * as dotenv from "dotenv";
+dotenv.config();
 
 export type ChainId = string;
 
