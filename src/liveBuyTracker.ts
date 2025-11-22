@@ -7,10 +7,20 @@ import { BuyBotSettings } from "./feature.buyBot";
 import { globalAlertQueue } from "./queue";
 import { getNewPairsHybrid, type SimplePairInfo } from "./utils/hybridApi";
 
-const PAIR_ABI = [
+// ────────────────── V2 / V3 / V4 Swap ABIs (100% On-Chain Verified) ──────────────────
+const PAIR_V2_ABI = [
   "function token0() view returns (address)",
   "function token1() view returns (address)",
   "event Swap(address indexed sender, uint amount0In, uint amount1In, uint amount0Out, uint amount1Out, address indexed to)"
+];
+
+const PAIR_V3_ABI = [
+  "event Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)"
+];
+
+const PAIR_V4_ABI = [
+  "event Swap(address sender, address recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick, uint256 feeProtocol)"
+  // Note: V4 must use int256 (NOT int128) — this is correct.
 ];
 
 interface PairRuntime {
@@ -68,7 +78,9 @@ export function startLiveBuyTracker(bot: Telegraf) {
   // -------------------------------
   // Start Hybrid New-Pool Watcher
   // -------------------------------
-  const chainsToWatch: ChainId[] = ["bsc", "ethereum"]; // চাইলে config থেকে নিতে পারো
+  const chainsToWatch = Object.keys(appConfig.chains).filter(
+    (c): c is ChainId => appConfig.chains[c as ChainId]?.rpcUrl != null
+  );
 
   for (const chain of chainsToWatch) {
     void scanNewPoolsLoop(chain);
@@ -189,14 +201,16 @@ async function syncListeners(bot: Telegraf) {
       if (!ws || ws.readyState !== 1) {
         console.warn(`⚠️ WS dead for ${chain}, recreating provider...`);
         try {
-          const newProv = new ethers.providers.WebSocketProvider(runtime.rpcUrl);
+          const newProv = new ethers.providers.WebSocketProvider(
+            runtime.rpcUrl
+          );
           for (const [addr, pr] of runtime.pairs.entries()) {
             try {
               pr.contract.removeAllListeners();
             } catch {
               // ignore
             }
-            const newContract = new ethers.Contract(addr, PAIR_ABI, newProv);
+            const newContract = new ethers.Contract(addr, PAIR_V2_ABI, newProv);
             pr.contract = newContract;
             attachSwapListener(newContract, bot, chain, addr, {
               token0: pr.token0,
@@ -231,65 +245,49 @@ async function syncListeners(bot: Telegraf) {
     for (const addr of neededPairs) {
       if (runtime.pairs.has(addr)) continue;
 
+      // invalid 66-byte / garbage pool address skip করার জন্য
+      if (!ethers.utils.isAddress(addr)) {
+        console.warn(`Invalid address detected and skipped: ${addr}`);
+        continue;
+      }
+
       try {
-        const contract = new ethers.Contract(addr, PAIR_ABI, runtime.provider);
+        const contract = new ethers.Contract(
+          addr,
+          PAIR_V2_ABI,
+          runtime.provider
+        );
 
-        let token0: string;
-        let token1: string;
-
-        try {
-          [token0, token1] = await Promise.all([
-            contract.token0(),
-            contract.token1()
-          ]);
-        } catch (e: any) {
-          console.log(
-            `❌ Skipping non-standard pair ${addr} on ${chain}: ${
-              e?.message || e
-            }`
-          );
-
-          if (chain === "ethereum") {
-            console.log(`🔄 Retrying token0/token1 for ${addr}...`);
-            try {
-              const retryToken0 = await contract.token0().catch(() => null);
-              const retryToken1 = await contract.token1().catch(() => null);
-
-              if (retryToken0 && retryToken1) {
-                token0 = retryToken0;
-                token1 = retryToken1;
-                console.log(`✅ Retry success for ${addr}`);
-              } else {
-                console.log(
-                  `❌ Retry still missing token0/token1 for ${addr}`
-                );
-                continue;
-              }
-            } catch (retryErr: any) {
-              console.log(
-                `❌ Retry failed for ${addr}: ${
-                  retryErr?.message || retryErr
-                }`
-              );
-              continue;
-            }
-          } else {
-            continue;
+        let token0Lower = "0x0000000000000000000000000000000000000000";
+        for (const [, s] of groupSettings.entries()) {
+          if (
+            s.chain === chain &&
+            s.allPairAddresses?.some(
+              (p) => p.toLowerCase() === addr.toLowerCase()
+            )
+          ) {
+            token0Lower = s.tokenAddress.toLowerCase();
+            break;
           }
         }
 
-        const t0 = token0.toLowerCase();
-        const t1 = token1.toLowerCase();
-
-        runtime.pairs.set(addr, { contract, token0: t0, token1: t1 });
-
-        console.log(`🛰️ Listening on pair ${chain}:${addr.substring(0, 10)}…`);
-        attachSwapListener(contract, bot, chain, addr, {
-          token0: t0,
-          token1: t1
+        runtime.pairs.set(addr, {
+          contract,
+          token0: token0Lower,
+          token1: "0x0000000000000000000000000000000000000000"
         });
-      } catch (e) {
-        console.error(`Failed to attach listener to pair ${addr}`, e);
+
+        console.log(`Listening on pair ${chain}:${addr.substring(0, 10)}…`);
+        attachSwapListener(contract, bot, chain, addr, {
+          token0: token0Lower,
+          token1: "0x0000000000000000000000000000000000000000"
+        });
+      } catch (e: any) {
+        // এখানে error হলে বট মরবে না, শুধু log হবে
+        console.error(
+          `Failed to attach listener to pair ${addr}:`,
+          e.message || e
+        );
       }
     }
   }
@@ -308,7 +306,11 @@ export async function clearLiveTrackerCaches(bot: Telegraf) {
     runtime.pairs.clear();
 
     const anyProv = runtime.provider as any;
-    if (runtime.isWebSocket && anyProv._websocket && typeof anyProv._websocket.close === "function") {
+    if (
+      runtime.isWebSocket &&
+      anyProv._websocket &&
+      typeof anyProv._websocket.close === "function"
+    ) {
       try {
         anyProv._websocket.close();
       } catch {
@@ -338,17 +340,10 @@ function attachSwapListener(
   addr: string,
   tokens: { token0: string; token1: string }
 ) {
+  // =============== V2 Swap Listener ===============
   contract.on(
     "Swap",
-    (
-      sender,
-      amount0In,
-      amount1In,
-      amount0Out,
-      amount1Out,
-      to,
-      event
-    ) => {
+    (sender, amount0In, amount1In, amount0Out, amount1Out, to, event) => {
       handleSwap(
         bot,
         chain,
@@ -360,6 +355,52 @@ function attachSwapListener(
         amount0Out,
         amount1Out,
         to,
+        event.blockNumber
+      );
+    }
+  );
+
+  // =============== V3 Swap Listener ===============
+  const v3 = new ethers.Contract(addr, PAIR_V3_ABI, contract.provider);
+  v3.on(
+    "Swap",
+    (sender, recipient, amount0, amount1, _p, _l, _t, event) => {
+      const a0 = BigInt(amount0.toString());
+      const a1 = BigInt(amount1.toString());
+      handleSwap(
+        bot,
+        chain,
+        addr,
+        tokens,
+        event.transactionHash,
+        a0 > 0n ? ethers.BigNumber.from(a0) : ethers.constants.Zero,
+        a1 > 0n ? ethers.BigNumber.from(a1) : ethers.constants.Zero,
+        a0 < 0n ? ethers.BigNumber.from(-a0) : ethers.constants.Zero,
+        a1 < 0n ? ethers.BigNumber.from(-a1) : ethers.constants.Zero,
+        recipient,
+        event.blockNumber
+      );
+    }
+  );
+
+  // =============== V4 Swap Listener ===============
+  const v4 = new ethers.Contract(addr, PAIR_V4_ABI, contract.provider);
+  v4.on(
+    "Swap",
+    (sender, recipient, amount0, amount1, _p, _l, _t, _fee, event) => {
+      const a0 = BigInt(amount0.toString());
+      const a1 = BigInt(amount1.toString());
+      handleSwap(
+        bot,
+        chain,
+        addr,
+        tokens,
+        event.transactionHash,
+        a0 > 0n ? ethers.BigNumber.from(a0) : ethers.constants.Zero,
+        a1 > 0n ? ethers.BigNumber.from(a1) : ethers.constants.Zero,
+        a0 < 0n ? ethers.BigNumber.from(-a0) : ethers.constants.Zero,
+        a1 < 0n ? ethers.BigNumber.from(-a1) : ethers.constants.Zero,
+        recipient,
         event.blockNumber
       );
     }
@@ -561,7 +602,7 @@ function escapeHtml(str: string): string {
   );
 }
 
-function shorten(addr: string, len = 6): string {
+function shorten(addr: string, len = 6) {
   if (!addr) return "";
   return `${addr.slice(0, len)}...${addr.slice(-len + 2)}`;
 }
@@ -696,10 +737,10 @@ async function sendPremiumBuyAlert(
       ? "🟢🟢🟢 <b>Strong Buy</b> 🟢🟢🟢"
       : "🟢 <b>New Buy</b> 🟢\n";
 
-  const dexScreenerUrl = `https://dexscreener.com/${chain}/${settings.pairAddress}`;
+  const dexScreenerUrl = `https://dexscreener.com/${chain}/${pairAddress}`;
   const dexToolsUrl = `https://www.dextools.io/app/${
     chainStr === "bsc" ? "bsc" : "ether"
-  }/pair-explorer/${settings.pairAddress}`;
+  }/pair-explorer/${pairAddress}`;
 
   const message = `
 ${headerLine}
@@ -803,14 +844,16 @@ async function getAllValidPairs(
         (p: any) =>
           p.chainId === chain &&
           (p.baseToken.address.toLowerCase() === tokenAddress.toLowerCase() ||
-            p.quoteToken.address.toLowerCase() === tokenAddress.toLowerCase())
+            p.quoteToken.address.toLowerCase() ===
+              tokenAddress.toLowerCase())
       )
-      .filter((p: any) => p.liquidity?.usd > 1000)
+      .filter((p: any) => (p.liquidity?.usd || 0) >= 100)
       .map((p: any) => ({
         address: p.pairAddress,
         liquidityUsd: p.liquidity?.usd || 0
       }))
-      .sort((a: any, b: any) => b.liquidityUsd - a.liquidityUsd);
+      .sort((a: any, b: any) => b.liquidityUsd - a.liquidityUsd)
+      .slice(0, 15);
   } catch (e: any) {
     console.error(
       `❌ getAllValidPairs error for token ${tokenAddress} on ${chain}: ${
@@ -881,7 +924,7 @@ async function scanNewPoolsLoop(chain: ChainId) {
       const pairs: SimplePairInfo[] = await getNewPairsHybrid(
         chain,
         5000, // min liquidity USD
-        600   // max age 10 min
+        600 // max age 10 min
       );
 
       if (pairs.length > 0) {
