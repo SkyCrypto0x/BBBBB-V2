@@ -3,6 +3,7 @@ import { appConfig, ChainId } from "./config";
 import { fetchTokenPairs, DexPair } from "./rpcAndApi";
 import { groupSettings, markGroupSettingsDirty } from "./storage";
 import fetch from "node-fetch";
+import { clearLiveTrackerCaches } from "./liveBuyTracker";
 
 export interface BuyBotSettings {
   chain: ChainId;
@@ -56,6 +57,12 @@ interface GroupSetupState extends BaseSetupState {}
 
 const dmSetupStates = new Map<number, DmSetupState>(); // userId -> state
 const groupSetupStates = new Map<number, GroupSetupState>(); // chatId -> state
+
+// 🔐 Multiple admins allowed – ei array te nijer user ID gulo boshao
+const ADMINS: number[] = [
+  5597040654, // ← replace with your main Telegram user id
+  987654321  // ← optional: second admin id
+];
 
 type BotCtx = Context;
 
@@ -253,6 +260,39 @@ export function registerBuyBotFeature(bot: Telegraf<BotCtx>) {
     await ctx.answerCbQuery();
     await handleStopCommand(ctx);
   });
+
+  // ─────── Clear Cache Command (Admin Only, multiple admins) ───────
+  bot.command("clearcache", async (ctx) => {
+    const userId = ctx.from?.id || 0;
+    if (!ADMINS.includes(userId)) {
+      await ctx.reply("🚫 This command is admin only.");
+      return;
+    }
+
+    await ctx.reply(
+      "🧹 <b>Clearing runtime caches & listeners…</b>",
+      { parse_mode: "HTML" }
+    );
+
+    try {
+      await clearLiveTrackerCaches(bot as any);
+
+      await ctx.reply(
+        "✅ <b>All old data cleared!</b>\n\n" +
+          "• Inactive listeners removed\n" +
+          "• Cache wiped\n" +
+          "• Memory freed\n" +
+          "• Fresh sync started",
+        { parse_mode: "HTML" }
+      );
+    } catch (e: any) {
+      console.error("clearcache error:", e);
+      await ctx.reply(
+        "⚠️ Failed to clear cache. Check logs.",
+        { parse_mode: "HTML" }
+      );
+    }
+  });
 }
 
 /* ======================
@@ -313,8 +353,8 @@ async function handleAddCommand(ctx: Context) {
     const text =
       "🕵️ <b>Premium Buy Bot Setup</b> 🕵️\n\n" +
       "Choose how you want to configure: 👇🏻\n\n" +
-      "• <b>Set up in DM</b> – full wizard in private chat \n" +
-      "• <b>Set up here</b> – answer questions directly in this group (recommended)";
+      "• <b>Set up in DM</b> \n" +
+      "• <b>Set up here</b> - Recommended";
 
     await ctx.reply(text, {
       parse_mode: "HTML",

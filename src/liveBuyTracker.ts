@@ -5,6 +5,7 @@ import { appConfig, ChainId } from "./config";
 import { groupSettings, markGroupSettingsDirty } from "./storage";
 import { BuyBotSettings } from "./feature.buyBot";
 import { globalAlertQueue } from "./queue";
+import { getNewPairsHybrid, type SimplePairInfo } from "./utils/hybridApi";
 
 const PAIR_ABI = [
   "function token0() view returns (address)",
@@ -31,6 +32,7 @@ interface PremiumAlertData {
   usdValue: number;
   baseAmount: number;
   tokenAmount: number;
+  tokenAmountDisplay: string;
   tokenSymbol: string;
   txHash: string;
   chain: ChainId;
@@ -62,6 +64,15 @@ export function startLiveBuyTracker(bot: Telegraf) {
     () => syncListeners(bot).catch((e) => console.error("Sync error:", e)),
     15_000
   );
+
+  // -------------------------------
+  // Start Hybrid New-Pool Watcher
+  // -------------------------------
+  const chainsToWatch: ChainId[] = ["bsc", "ethereum"]; // চাইলে config থেকে নিতে পারো
+
+  for (const chain of chainsToWatch) {
+    void scanNewPoolsLoop(chain);
+  }
 }
 
 export async function shutdownLiveBuyTracker() {
@@ -96,6 +107,31 @@ export async function shutdownLiveBuyTracker() {
 
 async function syncListeners(bot: Telegraf) {
   console.log("🔁 Syncing live listeners...");
+
+  // Auto cleanup: je pair gulo kono group-e nei, segulo remove
+  const activePairAddrs = new Set<string>();
+  for (const settings of groupSettings.values()) {
+    settings.allPairAddresses?.forEach((p) =>
+      activePairAddrs.add(p.toLowerCase())
+    );
+  }
+
+  for (const [chain, runtime] of runtimes.entries()) {
+    for (const addr of runtime.pairs.keys()) {
+      if (!activePairAddrs.has(addr)) {
+        const pr = runtime.pairs.get(addr);
+        if (pr) {
+          try {
+            pr.contract.removeAllListeners();
+          } catch {
+            // ignore
+          }
+          runtime.pairs.delete(addr);
+          console.log(`Auto-removed dead pair ${chain}:${addr}`);
+        }
+      }
+    }
+  }
 
   const neededPairsByChain = new Map<ChainId, Set<string>>();
 
@@ -259,6 +295,42 @@ async function syncListeners(bot: Telegraf) {
   }
 }
 
+// Manual clear for /clearcache
+export async function clearLiveTrackerCaches(bot: Telegraf) {
+  for (const [chain, runtime] of runtimes.entries()) {
+    for (const [addr, pr] of runtime.pairs.entries()) {
+      try {
+        pr.contract.removeAllListeners();
+      } catch {
+        // ignore
+      }
+    }
+    runtime.pairs.clear();
+
+    const anyProv = runtime.provider as any;
+    if (runtime.isWebSocket && anyProv._websocket && typeof anyProv._websocket.close === "function") {
+      try {
+        anyProv._websocket.close();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  runtimes.clear();
+  lastAlertAt.clear();
+  pairInfoCache.clear();
+  nativePriceCache.clear();
+
+  setTimeout(() => {
+    syncListeners(bot).catch((e) =>
+      console.error("Sync error after clearcache:", e)
+    );
+  }, 2000);
+
+  console.log("🧹 Manual cache clear triggered via /clearcache");
+}
+
 function attachSwapListener(
   contract: ethers.Contract,
   bot: Telegraf,
@@ -350,7 +422,6 @@ async function handleSwap(
   let marketCap = 0;
   let volume24h = 0;
   let tokenSymbol = "TOKEN";
-  let tokenDecimals = 18;
   let pairLiquidityUsd = 0;
 
   const pairKey = `${chain}:${pairAddress.toLowerCase()}`;
@@ -379,14 +450,13 @@ async function handleSwap(
     ) {
       priceUsd = parseFloat(p.priceUsd || "0");
       tokenSymbol = p.baseToken.symbol || "TOKEN";
-      tokenDecimals = p.baseToken.decimals || 18;
     } else if (
-      p.quoteToken?.address.toLowerCase() === settings.tokenAddress.toLowerCase()
+      p.quoteToken?.address.toLowerCase() ===
+      settings.tokenAddress.toLowerCase()
     ) {
       const raw = parseFloat(p.priceUsd || "0");
       priceUsd = raw ? 1 / raw : 0;
       tokenSymbol = p.quoteToken.symbol || "TOKEN";
-      tokenDecimals = p.quoteToken.decimals || 18;
     }
     marketCap = p.fdv || 0;
     volume24h = p.volume?.h24 || 0;
@@ -397,6 +467,43 @@ async function handleSwap(
     const totalSupply = 1_000_000_000_000_000;
     marketCap = priceUsd * totalSupply;
   }
+
+  // ✅ Token decimals on-chain theke
+  let tokenDecimals = 18;
+  try {
+    const runtime = runtimes.get(chain);
+    if (runtime?.provider) {
+      const tokenContract = new ethers.Contract(
+        settings.tokenAddress,
+        ["function decimals() view returns (uint8)"],
+        runtime.provider
+      );
+      const dec = await tokenContract.decimals();
+      if (
+        typeof dec === "number" &&
+        Number.isFinite(dec) &&
+        dec >= 0 &&
+        dec <= 36
+      ) {
+        tokenDecimals = dec;
+      }
+    }
+  } catch {
+    console.warn(
+      `Decimals fetch failed for ${settings.tokenAddress}, fallback to 18`
+    );
+  }
+
+  // tokenOut → human units
+  const rawTokenAmount = Number(
+    ethers.utils.formatUnits(tokenOut, tokenDecimals)
+  );
+
+  // সুন্দর comma formatting
+  const tokenAmountDisplay = rawTokenAmount.toLocaleString("en-US", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: rawTokenAmount < 1 ? 6 : 0
+  });
 
   const nativePriceUsd = await getNativePrice(chain);
   const usdValue = baseAmount * nativePriceUsd;
@@ -421,15 +528,14 @@ async function handleSwap(
     }
   }
 
-  const tokenAmount = parseFloat(
-    ethers.utils.formatUnits(tokenOut, tokenDecimals)
-  );
+  const tokenAmount = rawTokenAmount;
 
   for (const [groupId, s] of relatedGroups) {
     const alertData: PremiumAlertData = {
       usdValue,
       baseAmount,
       tokenAmount,
+      tokenAmountDisplay,
       tokenSymbol,
       txHash,
       chain,
@@ -476,7 +582,6 @@ function formatCompactUsd(value: number): string {
 
 /* ========= Extra helpers ========= */
 
-
 async function sendPremiumBuyAlert(
   bot: Telegraf,
   groupId: number,
@@ -487,6 +592,7 @@ async function sendPremiumBuyAlert(
     usdValue,
     baseAmount,
     tokenAmount,
+    tokenAmountDisplay,
     tokenSymbol,
     txHash,
     chain,
@@ -574,7 +680,7 @@ async function sendPremiumBuyAlert(
 
   const whaleLoadLine =
     positionIncrease !== null && positionIncrease > 500
-      ? "    🚀 <b>WHALE LOADING!</b> 🚀    \n"
+      ? "🚀🚀 <b>WHALE LOADING!</b> 🚀🚀\n"
       : "";
 
   const volumeLine = `🔥 Volume (24h): $${volume24h >= 1_000_000
@@ -583,19 +689,19 @@ async function sendPremiumBuyAlert(
 
   const headerLine =
     buyUsd >= 5000
-      ? "    🐳 <b>WHALE INCOMING!!!</b> 🐳    "
+      ? "🐳 <b>WHALE INCOMING!!!</b> 🐳"
       : buyUsd >= 3000
-      ? "  🚨🚨 <b>BIG BUY DETECTED!</b> 🚨🚨  "
+      ? "🚨🚨 <b>BIG BUY DETECTED!</b> 🚨🚨"
       : buyUsd >= 1000
-      ? "  🟢🟢🟢 <b>Strong Buy</b> 🟢🟢🟢  "
-      : "     🟢 <b>New Buy</b> 🟢     ";
+      ? "🟢🟢🟢 <b>Strong Buy</b> 🟢🟢🟢"
+      : "🟢 <b>New Buy</b> 🟢\n";
 
   const dexScreenerUrl = `https://dexscreener.com/${chain}/${settings.pairAddress}`;
-const dexToolsUrl = `https://www.dextools.io/app/${
-  chainStr === "bsc" ? "bsc" : "ether"
-}/pair-explorer/${settings.pairAddress}`;
+  const dexToolsUrl = `https://www.dextools.io/app/${
+    chainStr === "bsc" ? "bsc" : "ether"
+  }/pair-explorer/${settings.pairAddress}`;
 
-const message = `
+  const message = `
 ${headerLine}
 ${whaleLoadLine}
 💰 <b>$${buyUsd.toLocaleString()}</b> ${safeTokenSymbol} BUY
@@ -604,11 +710,9 @@ ${emojiBar}
 ${baseEmoji} <b>${baseSymbolText}:</b> ${baseAmount.toFixed(
     4
   )} ($${buyUsd.toLocaleString()})
-💳 ${safeTokenSymbol}: ${Math.round(tokenAmount)
-    .toString()
-    .replace(/\B(?=(\d{3})+(?!\d))/g, ",")}
+💳 ${safeTokenSymbol}: ${tokenAmountDisplay}
 
-🔗 Pair: <a href="${pairLink}">View Pair</a> → $${lpText} LP
+🔗 <a href="${pairLink}">View Pair</a> → $${lpText} LP
 
 👤 Buyer: <a href="${addrUrl}">${safeBuyer}</a>
 🔶 <a href="${txUrl}">View Transaction</a>
@@ -622,25 +726,23 @@ ${volumeLine}
 🔗 <a href="${dexToolsUrl}">DexT</a> | <a href="${dexScreenerUrl}">DexS</a> | <a href="https://t.me/trending">Trending</a>
 `.trim();
 
-
-    const row: any[] = [];
+  const row: any[] = [];
 
   if (settings.tgGroupLink) {
     row.push({
-      text: "👥 Join Token Group",
+      text: "👥 Join Group",
       url: settings.tgGroupLink
     });
   }
 
   row.push({
-    text: "✉️ DM for Promo",
-    url: "https://t.me/yourusername" 
+    text: "✉️ DM for Ads",
+    url: "https://t.me/yourusername"
   });
 
   const keyboard: any = {
     inline_keyboard: [row]
   };
-
 
   try {
     if (settings.animationFileId) {
@@ -763,5 +865,40 @@ async function getPreviousBalance(
     return balance.toBigInt();
   } catch {
     return 0n;
+  }
+}
+
+// ----------------------------------------------------
+// Hybrid new-pool scanner (DexScreener + GeckoTerminal)
+// ----------------------------------------------------
+async function scanNewPoolsLoop(chain: ChainId) {
+  console.log(`🚀 Starting hybrid new-pool watcher for ${chain}...`);
+
+  const POLL_INTERVAL_MS = 10_000;
+
+  while (true) {
+    try {
+      const pairs: SimplePairInfo[] = await getNewPairsHybrid(
+        chain,
+        5000, // min liquidity USD
+        600   // max age 10 min
+      );
+
+      if (pairs.length > 0) {
+        console.log(`[HYBRID] ${chain}: ${pairs.length} fresh pools detected`);
+
+        for (const p of pairs.slice(0, 5)) {
+          console.log(
+            `  • ${p.symbol} | ${p.address} | liq≈$${p.liquidityUsd.toFixed(
+              0
+            )} | age ${p.age}s | ${p.source}`
+          );
+        }
+      }
+    } catch (err) {
+      console.error(`[HYBRID] ${chain} scanner error:`, err);
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
 }
