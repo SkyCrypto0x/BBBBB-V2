@@ -49,6 +49,30 @@ const NATIVE_TTL_MS = 30_000;
 const pairInfoCache = new Map<string, { value: any | null; ts: number }>();
 const PAIR_INFO_TTL_MS = 15_000;
 
+// Periodic pruning to avoid unbounded Map size
+const CACHE_PRUNE_INTERVAL_MS = 5 * 60_000; // 5 minutes
+
+setInterval(() => {
+  const now = Date.now();
+
+  // nativePriceCache: delete entries long past TTL
+  for (const [key, entry] of nativePriceCache.entries()) {
+    if (now - entry.ts > NATIVE_TTL_MS + 60_000) {
+      nativePriceCache.delete(key);
+    }
+  }
+
+  // pairInfoCache: delete entries long past TTL
+  for (const [key, entry] of pairInfoCache.entries()) {
+    if (now - entry.ts > PAIR_INFO_TTL_MS + 5 * 60_000) {
+      pairInfoCache.delete(key);
+    }
+  }
+}, CACHE_PRUNE_INTERVAL_MS);
+
+// per-chain abort controller for hybrid scanners
+const scannerAbortControllers = new Map<ChainId, AbortController>();
+
 // helpers – clear caches from /clearcache
 export function clearChainCaches() {
   pairInfoCache.clear();
@@ -271,11 +295,6 @@ async function handleSwap(
     pairLiquidityUsd = p.liquidity?.usd || 0;
   }
 
-  if (marketCap === 0 && priceUsd > 0) {
-    const totalSupply = 1_000_000_000_000_000;
-    marketCap = priceUsd * totalSupply;
-  }
-
   // on-chain token decimals
   let tokenDecimals = 18;
   try {
@@ -300,6 +319,40 @@ async function handleSwap(
     console.warn(
       `Decimals fetch failed for ${settings.tokenAddress}, fallback to 18`
     );
+  }
+
+  // Better marketCap fallback: try on-chain totalSupply when Dex data missing
+  if (marketCap === 0 && priceUsd > 0) {
+    try {
+      const runtime = runtimes.get(chain);
+      if (runtime?.provider) {
+        const tokenContract = new ethers.Contract(
+          settings.tokenAddress,
+          ["function totalSupply() view returns (uint256)"],
+          runtime.provider
+        );
+
+        const supplyBn = await tokenContract.totalSupply();
+        const supply = Number(
+          ethers.utils.formatUnits(supplyBn, tokenDecimals)
+        );
+
+        if (Number.isFinite(supply) && supply > 0) {
+          marketCap = priceUsd * supply;
+          console.log(
+            `[MC] Computed on-chain MC for ${settings.tokenAddress}: ~${marketCap.toFixed(
+              0
+            )}`
+          );
+        }
+      }
+    } catch (e) {
+      console.warn(
+        `[MC] totalSupply fallback failed for ${settings.tokenAddress}:`,
+        (e as any)?.message ?? e
+      );
+      // keep marketCap = 0 → UI will show "Low Liq"
+    }
   }
 
   const rawTokenAmount = Number(
@@ -452,7 +505,7 @@ export async function getNativePrice(chain: ChainId): Promise<number> {
     const res = await fetch(
       `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`
     );
-    const data: any = await res.json();
+      const data: any = await res.json();
     price = parseFloat(data.price);
   } catch {
     // fallback
@@ -490,11 +543,18 @@ export async function getPreviousBalance(
 // Hybrid new-pool scanner (DexScreener + GeckoTerminal)
 // ----------------------------------------------------
 export async function scanNewPoolsLoop(chain: ChainId) {
+  // যদি আগেরটা already চলে, আগে abort
+  const existing = scannerAbortControllers.get(chain);
+  existing?.abort();
+
+  const controller = new AbortController();
+  scannerAbortControllers.set(chain, controller);
+
   console.log(`🚀 Starting hybrid new-pool watcher for ${chain}...`);
 
   const POLL_INTERVAL_MS = 30_000;
 
-  while (true) {
+  while (!controller.signal.aborted) {
     try {
       const pairs: SimplePairInfo[] = await getNewPairsHybrid(
         chain,
@@ -513,10 +573,25 @@ export async function scanNewPoolsLoop(chain: ChainId) {
           );
         }
       }
-    } catch (err) {
-      console.error(`[HYBRID] ${chain} scanner error:`, err);
+    } catch (err: any) {
+      if (!controller.signal.aborted) {
+        console.error(
+          `[HYBRID] ${chain} scanner error:`,
+          err?.message ?? err
+        );
+      }
     }
 
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
+
+  console.log(`🛑 Hybrid new-pool watcher stopped for ${chain}`);
+}
+
+export function stopAllHybridScanners() {
+  for (const [chain, controller] of scannerAbortControllers.entries()) {
+    controller.abort();
+    console.log(`🛑 Stopping hybrid scanner for ${chain}`);
+  }
+  scannerAbortControllers.clear();
 }

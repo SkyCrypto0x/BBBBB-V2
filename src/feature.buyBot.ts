@@ -41,6 +41,7 @@ type SetupStep =
 interface BaseSetupState {
   step: SetupStep;
   settings: Partial<BuyBotSettings>;
+  createdAt: number; // timestamp for cleanup
 }
 
 // DM flow: per-user state (targetChatId = which group they are configuring)
@@ -54,11 +55,32 @@ interface GroupSetupState extends BaseSetupState {}
 const dmSetupStates = new Map<number, DmSetupState>(); // userId -> state
 const groupSetupStates = new Map<number, GroupSetupState>(); // chatId -> state
 
+const SETUP_STATE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+setInterval(() => {
+  const now = Date.now();
+
+  for (const [userId, st] of dmSetupStates.entries()) {
+    if (now - st.createdAt > SETUP_STATE_TTL_MS) {
+      dmSetupStates.delete(userId);
+    }
+  }
+
+  for (const [chatId, st] of groupSetupStates.entries()) {
+    if (now - st.createdAt > SETUP_STATE_TTL_MS) {
+      groupSetupStates.delete(chatId);
+    }
+  }
+}, 15 * 60 * 1000); // every 15 min
+
 // Multiple admins allowed – put your own Telegram user IDs here
-const ADMINS: number[] = [
-  5597040654, // ← replace with your main Telegram user id
-  987654321   // ← optional: second admin id
-];
+const ADMINS: number[] = process.env.ADMIN_IDS
+  ? process.env.ADMIN_IDS.split(",")
+      .map((id) => Number(id.trim()))
+      .filter((id) => Number.isFinite(id))
+  : [
+      5597040654 // fallback: main owner id
+    ];
 
 type BotCtx = Context;
 
@@ -101,7 +123,8 @@ export function registerBuyBotFeature(bot: Telegraf<BotCtx>) {
         targetChatId: groupId,
         settings: {
           chain: appConfig.defaultChain
-        }
+        },
+        createdAt: Date.now()
       });
 
       await ctx.reply(
@@ -181,7 +204,8 @@ export function registerBuyBotFeature(bot: Telegraf<BotCtx>) {
     const chatId = chat.id;
     groupSetupStates.set(chatId, {
       step: "token",
-      settings: { chain: appConfig.defaultChain }
+      settings: { chain: appConfig.defaultChain },
+      createdAt: Date.now()
     });
 
     await ctx.editMessageReplyMarkup(undefined).catch(() => {});

@@ -28,6 +28,18 @@ export function clearAlertCooldowns() {
   lastAlertAt.clear();
 }
 
+// Periodic cleanup for cooldown map: delete entries older than 24h
+const COOLDOWN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, ts] of lastAlertAt.entries()) {
+    if (now - ts > COOLDOWN_MAX_AGE_MS) {
+      lastAlertAt.delete(key);
+    }
+  }
+}, 60 * 60 * 1000); // every 1h
+
 // ────────────────── ALERT RENDERING ──────────────────
 
 function escapeHtml(str: string): string {
@@ -138,7 +150,7 @@ export async function sendPremiumBuyAlert(
 
   // 🔥 MC compact format: 620K / 75.4M etc.
   const mcText =
-    marketCap > 0 ? formatCompactUsd(marketCap) : "0";
+    marketCap > 1_000 ? formatCompactUsd(marketCap) : "Low Liq";
 
   // 🔥 LP = এই buy যেই pair থেকে এসেছে, সেইটার LP
   const mainPairLp = pairLiquidityUsd || 0;

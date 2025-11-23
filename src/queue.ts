@@ -14,6 +14,10 @@ export class AlertQueue {
   private readonly maxPerSecond: number;
   private readonly maxInFlight: number;
   private readonly sentTimestamps: number[] = [];
+
+  // NEW: hard cap to prevent unbounded growth
+  private readonly MAX_QUEUE_SIZE = 5000;
+
   private timer: NodeJS.Timeout;
 
   constructor(opts: AlertQueueOptions) {
@@ -23,6 +27,15 @@ export class AlertQueue {
   }
 
   enqueue(job: AlertJob) {
+    // NEW: drop oldest if queue is too big
+    if (this.jobs.length >= this.MAX_QUEUE_SIZE) {
+      this.jobs.shift(); // drop oldest
+      console.warn(
+        `[AlertQueue] Overflow – dropped oldest job, size now ${this.jobs.length}`
+      );
+    }
+
+    // existing logic unchanged
     this.jobs.push(job);
   }
 

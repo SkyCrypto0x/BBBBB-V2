@@ -9,7 +9,8 @@ import {
   getAllValidPairs,
   scanNewPoolsLoop,
   clearChainCaches,
-  ChainRuntime
+  ChainRuntime,
+  stopAllHybridScanners
 } from "./chains.runtime";
 import { clearAlertCooldowns } from "./alerts.buy";
 
@@ -61,6 +62,9 @@ export async function shutdownLiveBuyTracker() {
       }
     }
   }
+
+  // Stop background hybrid scanners
+  stopAllHybridScanners();
 
   runtimes.clear();
   console.log("🔻 LiveBuyTracker shutdown complete");
