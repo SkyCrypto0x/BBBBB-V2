@@ -118,6 +118,39 @@ export function registerBuyBotFeature(bot: Telegraf<BotCtx>) {
       const groupId = Number(payload.replace("setup_", ""));
       const userId = ctx.from!.id;
 
+      // basic validation – payload থেকে groupId na paile
+      if (!Number.isFinite(groupId)) {
+        await ctx.reply(
+          "❌ Invalid setup link.\nPlease send <code>/add</code> again in your group.",
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+
+      // global ADMINS override পাবে, বাকিদের admin হতে হবে ওই group-এ
+      if (!ADMINS.includes(userId)) {
+        try {
+          const member = await ctx.telegram.getChatMember(groupId, userId);
+          const status = member.status;
+
+          if (status !== "administrator" && status !== "creator") {
+            await ctx.reply(
+              "🚫 Only <b>group admins</b> can configure this group.\n" +
+                "Ask an admin to send <code>/add</code> in the group.",
+              { parse_mode: "HTML" }
+            );
+            return;
+          }
+        } catch (err) {
+          await ctx.reply(
+            "⚠️ I couldn't verify your admin status for that group.\n" +
+              "Make sure I'm still in the group and try <code>/add</code> again there.",
+            { parse_mode: "HTML" }
+          );
+          return;
+        }
+      }
+
       dmSetupStates.set(userId, {
         step: "token",
         targetChatId: groupId,
@@ -580,9 +613,23 @@ async function runSetupStep(
       return;
     }
 
+    // 🔁 UPDATED BLOCK: strong validation for manual pair
     case "pair": {
-      state.settings.pairAddress = text;
-      (state.settings as any).allPairAddresses = [text];
+      const pair = text.trim();
+
+      // Strong validation
+      if (!/^0x[a-fA-F0-9]{40}$/.test(pair)) {
+        await ctx.reply(
+          "❌ Invalid pair address.\n" +
+            "Please send a valid pool address in <code>0x...</code> format.",
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+
+      state.settings.pairAddress = pair.toLowerCase();
+      (state.settings as any).allPairAddresses = [state.settings.pairAddress];
+
       state.step = "emoji";
       await ctx.reply(
         "3️⃣ Now send a <b>buy emoji</b> (e.g. 🐶, 🧠, 🚀).",
