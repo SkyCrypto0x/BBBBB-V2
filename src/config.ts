@@ -15,6 +15,10 @@ export interface AppConfig {
   botUsername: string;
   defaultChain: ChainId;
   chains: Record<ChainId, ChainConfig>;
+
+  // 🔥 new optional URLs
+  trendingChannelUrl?: string;
+  adsContactUrl?: string;
 }
 
 function safeReadConfigJson(): Partial<AppConfig> & {
@@ -54,6 +58,33 @@ const chains: Record<ChainId, ChainConfig> = {
       rawJson.chains?.base?.explorer ||
       "https://basescan.org"
   },
+  // 🔵 Arbitrum added
+  arbitrum: {
+    rpcUrl:
+      process.env.ARB_RPC_URL || rawJson.chains?.arbitrum?.rpcUrl || "",
+    explorer:
+      process.env.ARB_EXPLORER ||
+      rawJson.chains?.arbitrum?.explorer ||
+      "https://arbiscan.io"
+  },
+  // 🟣 Polygon added
+  polygon: {
+    rpcUrl:
+      process.env.POLYGON_RPC_URL || rawJson.chains?.polygon?.rpcUrl || "",
+    explorer:
+      process.env.POLYGON_EXPLORER ||
+      rawJson.chains?.polygon?.explorer ||
+      "https://polygonscan.com"
+  },
+  // 🔺 Avalanche added
+  avalanche: {
+    rpcUrl:
+      process.env.AVAX_RPC_URL || rawJson.chains?.avalanche?.rpcUrl || "",
+    explorer:
+      process.env.AVAX_EXPLORER ||
+      rawJson.chains?.avalanche?.explorer ||
+      "https://snowtrace.io"
+  },
   monad: {
     rpcUrl:
       process.env.MONAD_RPC_URL || rawJson.chains?.monad?.rpcUrl || "",
@@ -62,7 +93,6 @@ const chains: Record<ChainId, ChainConfig> = {
       rawJson.chains?.monad?.explorer ||
       "https://testnet.monadscan.com"
   }
-  // চাইলে এখানে base, arb ইত্যাদি add করবি
 };
 
 export const appConfig: AppConfig = {
@@ -81,6 +111,13 @@ export const appConfig: AppConfig = {
     (process.env.DEFAULT_CHAIN as ChainId | undefined) ||
     (rawJson.defaultChain as ChainId | undefined) ||
     "bsc",
+
+  // 🔥 new optional URLs read from env or config.json
+  trendingChannelUrl:
+    process.env.TRENDING_CHANNEL_URL || rawJson.trendingChannelUrl,
+
+  adsContactUrl:
+    process.env.ADS_CONTACT_URL || rawJson.adsContactUrl,
 
   chains
 };

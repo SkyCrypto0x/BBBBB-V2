@@ -13,9 +13,9 @@ export interface BuyBotSettings {
   emoji: string;
 
   // visual options
-  imageUrl?: string;          // http(s) url
-  imageFileId?: string;       // uploaded photo file_id
-  animationFileId?: string;   // uploaded gif/video file_id
+  imageUrl?: string;        // http(s) url
+  imageFileId?: string;     // uploaded photo file_id
+  animationFileId?: string; // uploaded gif/video file_id
 
   // filters
   minBuyUsd: number;
@@ -25,12 +25,8 @@ export interface BuyBotSettings {
   tgGroupLink?: string;
   autoPinDataPosts: boolean;
   autoPinKolAlerts: boolean;
-  cooldownSeconds?: number;   // NEW: per group+pair cooldown in seconds
+  cooldownSeconds?: number; // per group+pair cooldown in seconds
 }
-
-// groupId -> final premium settings
-// ❌ OLD: local map এখানে ছিল, এখন storage.ts থেকে আসছে
-// export const groupSettings = new Map<number, BuyBotSettings>();
 
 type SetupStep =
   | "token"
@@ -47,7 +43,7 @@ interface BaseSetupState {
   settings: Partial<BuyBotSettings>;
 }
 
-// DM flow: per-user state (targetChatId = je group configure korche)
+// DM flow: per-user state (targetChatId = which group they are configuring)
 interface DmSetupState extends BaseSetupState {
   targetChatId: number;
 }
@@ -58,23 +54,44 @@ interface GroupSetupState extends BaseSetupState {}
 const dmSetupStates = new Map<number, DmSetupState>(); // userId -> state
 const groupSetupStates = new Map<number, GroupSetupState>(); // chatId -> state
 
-// 🔐 Multiple admins allowed – ei array te nijer user ID gulo boshao
+// Multiple admins allowed – put your own Telegram user IDs here
 const ADMINS: number[] = [
   5597040654, // ← replace with your main Telegram user id
-  987654321  // ← optional: second admin id
+  987654321   // ← optional: second admin id
 ];
 
 type BotCtx = Context;
 
+// ───────────────────────────────────────────
+// Admin / permission helper
+// ───────────────────────────────────────────
+async function isAdminOrCreator(ctx: Context): Promise<boolean> {
+  if (!ctx.from || !ctx.chat) return false;
+
+  // In DM we allow everything (needed for deep-link setup)
+  if (ctx.chat.type === "private") return true;
+
+  // Global hard-coded bot admins
+  if (ADMINS.includes(ctx.from.id)) return true;
+
+  // Check Telegram chat role
+  try {
+    const member = await ctx.telegram.getChatMember(ctx.chat.id, ctx.from.id);
+    return member.status === "administrator" || member.status === "creator";
+  } catch {
+    return false;
+  }
+}
+
 export function registerBuyBotFeature(bot: Telegraf<BotCtx>) {
-  // 🔹 /start – DM + group premium UX
+  // /start – DM + group UX
   bot.start(async (ctx) => {
     const chat = ctx.chat;
     if (!chat) return;
 
     const payload = (ctx as any).startPayload as string | undefined;
 
-    // DM with payload: deep-link from group -> start wizard for that group
+    // DM with payload: deep-link from group -> start setup wizard for that group
     if (chat.type === "private" && payload && payload.startsWith("setup_")) {
       const groupId = Number(payload.replace("setup_", ""));
       const userId = ctx.from!.id;
@@ -88,9 +105,9 @@ export function registerBuyBotFeature(bot: Telegraf<BotCtx>) {
       });
 
       await ctx.reply(
-        "🕵️ <b>Premium Buy Bot Setup</b>\n\n" +
-          "1️⃣ Send your <b>token contract address</b>\n" +
-          "I'll auto-detect <u>all pools</u> and pick the main one.",
+        "🕵️ <b>Premium Buy Bot · Setup</b>\n\n" +
+          "1️⃣ Send your <b>token contract address</b> (EVM · <code>0x...</code>)\n" +
+          "➡️ I will auto-detect all pools and pick the main pair.",
         { parse_mode: "HTML" }
       );
       return;
@@ -102,49 +119,62 @@ export function registerBuyBotFeature(bot: Telegraf<BotCtx>) {
 
       await ctx.reply(
         "🕵️ <b>Premium Buy Bot</b>\n\n" +
-          "• Tracks buys for your token\n" +
-          "• Uses all DexScreener pools\n" +
-          "• Min & max buy filters\n" +
-          "• Custom emoji + GIF / image alerts\n\n" +
-          "➊ Press the button below to <b>add me to your group</b>.\n" +
-          "➋ In the group, use <code>/add</code> to configure.",
+          "🔥 Live buy alerts for your token.\n\n" +
+          "• Multi-chain (ETH / BSC / BASE / MONAD)\n" +
+          "• DexScreener pools auto-detect\n" +
+          "• Min / Max buy filter\n" +
+          "• Custom emoji + GIF / image\n\n" +
+          "🚀 To get started:\n" +
+          "1️⃣ Add this bot to your token group\n" +
+          "2️⃣ In the group, send <code>/add</code>\n",
         {
           parse_mode: "HTML",
           ...Markup.inlineKeyboard([
-            [Markup.button.url("➕ Add to group", addToGroupUrl)]
+            [Markup.button.url("➕ Add bot to group", addToGroupUrl)]
           ])
         }
       );
       return;
     }
 
-    // Group /start – show premium control panel
+    // Group /start – show control panel
     if (chat.type === "group" || chat.type === "supergroup") {
       await sendGroupHelp(ctx);
       return;
     }
   });
 
-  // 🔹 /stop – stop alerts for this group
+  // /stop – stop alerts for this group (admin only)
   bot.command("stop", async (ctx) => {
+    if (!(await isAdminOrCreator(ctx))) {
+      await ctx.reply("🚫 Only group admins can use /stop.");
+      return;
+    }
     await handleStopCommand(ctx);
   });
 
-  // 🔹 /add – main premium entry point (group + DM)
+  // /add – main entry point (group + DM) (admin only in groups)
   bot.command("add", async (ctx) => {
+    if (!(await isAdminOrCreator(ctx))) {
+      await ctx.reply("🚫 Only group admins can use /add.");
+      return;
+    }
     await handleAddCommand(ctx);
-  });
-
-  // 🔹 /testbuy – premium-style test alert (with image/gif)
-  bot.command("testbuy", async (ctx) => {
-    await handleTestBuyCommand(ctx);
   });
 
   // Group inline button: "Set up here"
   bot.action("setup_here", async (ctx) => {
     const chat = ctx.chat;
     if (!chat || (chat.type !== "group" && chat.type !== "supergroup")) {
-      await ctx.answerCbQuery("Use this inside your project group.");
+      await ctx.answerCbQuery("Use this button inside your token group.");
+      return;
+    }
+
+    // Admin gate for inline setup button
+    if (!(await isAdminOrCreator(ctx))) {
+      await ctx.answerCbQuery("Only group admins can set up the bot.", {
+        show_alert: true
+      });
       return;
     }
 
@@ -156,16 +186,16 @@ export function registerBuyBotFeature(bot: Telegraf<BotCtx>) {
 
     await ctx.editMessageReplyMarkup(undefined).catch(() => {});
     await ctx.reply(
-      "🕵️ <b>Group Setup Mode</b>\n\n" +
-        "1️⃣ Reply with your <b>token contract address</b>.\n" +
-        "I'll auto-detect all pools...",
+      "🕵️ <b>Group Setup</b>\n\n" +
+        "1️⃣ Send your <b>token contract address</b> (EVM · <code>0x...</code>)\n" +
+        "🔎 I will auto-detect pools and select the main pair.",
       { parse_mode: "HTML" }
     );
 
     await ctx.answerCbQuery();
   });
 
-  // 🔹 Text handler – DM + group wizard
+  // Text handler – DM + group wizard
   bot.on("text", async (ctx, next) => {
     const chat = ctx.chat;
     if (!chat) return next();
@@ -195,7 +225,7 @@ export function registerBuyBotFeature(bot: Telegraf<BotCtx>) {
     return next();
   });
 
-  // 🔹 Photo / GIF handler – only used on “image” step
+  // Photo / GIF handler – only used on “image” step
   bot.on(["photo", "animation"], async (ctx, next) => {
     const chat = ctx.chat;
     if (!chat) return next();
@@ -222,7 +252,8 @@ export function registerBuyBotFeature(bot: Telegraf<BotCtx>) {
 
       state.step = "minBuy";
       await ctx.reply(
-        "📸 Image saved!\n\n5️⃣ Send <b>minimum $ buy</b> that will trigger an alert (e.g. 50).",
+        "📸 Image saved!\n\n" +
+          "5️⃣ Now send the <b>minimum $ buy</b> that should trigger an alert (e.g. <code>50</code>).",
         { parse_mode: "HTML" }
       );
       return;
@@ -235,7 +266,8 @@ export function registerBuyBotFeature(bot: Telegraf<BotCtx>) {
 
       state.step = "minBuy";
       await ctx.reply(
-        "🎞 GIF saved!\n\n5️⃣ Send <b>minimum $ buy</b> that will trigger an alert (e.g. 50).",
+        "🎞 GIF saved!\n\n" +
+          "5️⃣ Now send the <b>minimum $ buy</b> that should trigger an alert (e.g. <code>50</code>).",
         { parse_mode: "HTML" }
       );
       return;
@@ -244,53 +276,66 @@ export function registerBuyBotFeature(bot: Telegraf<BotCtx>) {
     return next();
   });
 
-  // 🔹 Inline button commands (Premium panel buttons) – now DIRECT actions
+  // Inline button commands – direct actions (with admin checks)
   bot.action("cmd_add", async (ctx) => {
+    const chat = ctx.chat;
+
+    if (chat && (chat.type === "group" || chat.type === "supergroup")) {
+      if (!(await isAdminOrCreator(ctx))) {
+        await ctx.answerCbQuery("Only group admins can use this.", {
+          show_alert: true
+        });
+        return;
+      }
+    }
+
     await ctx.answerCbQuery();
     await handleAddCommand(ctx);
   });
 
-  bot.action("cmd_testbuy", async (ctx) => {
-    await ctx.answerCbQuery();
-    // force 250 USD test buy
-    await handleTestBuyCommand(ctx, 250);
-  });
-
   bot.action("cmd_stop", async (ctx) => {
+    const chat = ctx.chat;
+
+    if (chat && (chat.type === "group" || chat.type === "supergroup")) {
+      if (!(await isAdminOrCreator(ctx))) {
+        await ctx.answerCbQuery("Only group admins can stop alerts.", {
+          show_alert: true
+        });
+        return;
+      }
+    }
+
     await ctx.answerCbQuery();
     await handleStopCommand(ctx);
   });
 
-  // ─────── Clear Cache Command (Admin Only, multiple admins) ───────
+  // /clearcache – Admin only, multiple admins supported
   bot.command("clearcache", async (ctx) => {
     const userId = ctx.from?.id || 0;
     if (!ADMINS.includes(userId)) {
-      await ctx.reply("🚫 This command is admin only.");
+      await ctx.reply("🚫 This command is restricted to bot admins.");
       return;
     }
 
-    await ctx.reply(
-      "🧹 <b>Clearing runtime caches & listeners…</b>",
-      { parse_mode: "HTML" }
-    );
+    await ctx.reply("🧹 <b>Clearing cache & listeners…</b>", {
+      parse_mode: "HTML"
+    });
 
     try {
       await clearLiveTrackerCaches(bot as any);
 
       await ctx.reply(
-        "✅ <b>All old data cleared!</b>\n\n" +
-          "• Inactive listeners removed\n" +
-          "• Cache wiped\n" +
-          "• Memory freed\n" +
+        "✅ <b>Done.</b>\n" +
+          "• Old listeners removed\n" +
+          "• Cache cleared\n" +
           "• Fresh sync started",
         { parse_mode: "HTML" }
       );
     } catch (e: any) {
       console.error("clearcache error:", e);
-      await ctx.reply(
-        "⚠️ Failed to clear cache. Check logs.",
-        { parse_mode: "HTML" }
-      );
+      await ctx.reply("⚠️ Cache clear failed. Check logs.", {
+        parse_mode: "HTML"
+      });
     }
   });
 }
@@ -301,7 +346,7 @@ export function registerBuyBotFeature(bot: Telegraf<BotCtx>) {
 
 async function handleStopCommand(ctx: Context) {
   if (!ctx.chat || (ctx.chat.type !== "group" && ctx.chat.type !== "supergroup")) {
-    await ctx.reply("Use /stop inside the token group.");
+    await ctx.reply("Use /stop inside your token group.");
     return;
   }
 
@@ -310,11 +355,12 @@ async function handleStopCommand(ctx: Context) {
     groupSettings.delete(groupId);
     markGroupSettingsDirty(); // persist change
     await ctx.reply(
-      "🛑 <b>Buy alerts stopped for this group!</b>\n\nTo start again, use /add",
+      "🛑 <b>Buy alerts stopped for this group.</b>\n\n" +
+        "To enable again, send <code>/add</code>.",
       { parse_mode: "HTML" }
     );
   } else {
-    await ctx.reply("ℹ️ No active tracking in this group.");
+    await ctx.reply("ℹ️ There is no active tracking in this group.");
   }
 
   await sendGroupHelp(ctx);
@@ -324,18 +370,18 @@ async function handleAddCommand(ctx: Context) {
   const chat = ctx.chat;
   if (!chat) return;
 
-  // DM: politely explain flow (must come via group)
+  // DM: explain flow (must be triggered from a group)
   if (chat.type === "private") {
     const addToGroupUrl = `https://t.me/${appConfig.botUsername}?startgroup=true`;
     await ctx.reply(
-      "To configure a token, please:\n\n" +
-        "1️⃣ Add me to your token's group\n" +
-        "2️⃣ In the group, type <code>/add</code>\n" +
-        "3️⃣ Tap <b>Set up in DM</b> or <b>Set up here</b>",
+      "⚙️ <b>How to set up the bot</b>\n\n" +
+        "1️⃣ Add this bot to your token group\n" +
+        "2️⃣ In the group, send <code>/add</code>\n" +
+        "3️⃣ Then choose to set up in DM or directly in the group ✅",
       {
         parse_mode: "HTML",
         ...Markup.inlineKeyboard([
-          [Markup.button.url("➕ Add to group", addToGroupUrl)]
+          [Markup.button.url("➕ Add bot to group", addToGroupUrl)]
         ])
       }
     );
@@ -351,93 +397,23 @@ async function handleAddCommand(ctx: Context) {
     groupSetupStates.delete(groupId);
 
     const text =
-      "🕵️ <b>Premium Buy Bot Setup</b> 🕵️\n\n" +
-      "Choose how you want to configure: 👇🏻\n\n" +
-      "• <b>Set up in DM</b> \n" +
-      "• <b>Set up here</b> - Recommended";
+      "🕵️ <b>Premium Buy Bot · Setup</b>\n\n" +
+      "Where do you want to configure? 👇\n\n" +
+      "💬 In DM – private, clean flow\n" +
+      "🏠 In this group – so everyone can see & learn\n";
 
     await ctx.reply(text, {
       parse_mode: "HTML",
       ...Markup.inlineKeyboard([
         [
           Markup.button.url("💬 Set up in DM", setupDmUrl),
-          Markup.button.callback("🏠 Set up here", "setup_here")
+          Markup.button.callback("🏠 Set up in this group", "setup_here")
         ]
       ])
     });
 
     return;
   }
-}
-
-async function handleTestBuyCommand(ctx: Context, forcedUsd?: number) {
-  const chat = ctx.chat;
-  if (!chat || (chat.type !== "group" && chat.type !== "supergroup")) {
-    await ctx.reply("Use /testbuy inside a group where the bot is configured.");
-    return;
-  }
-
-  const settings = groupSettings.get(chat.id);
-  if (!settings) {
-    await ctx.reply(
-      "No settings yet for this group.\nRun <code>/add</code> to configure first.",
-      { parse_mode: "HTML" }
-    );
-    return;
-  }
-
-  let usdVal: number;
-
-  if (forcedUsd !== undefined) {
-    usdVal = forcedUsd;
-  } else {
-    const text = (ctx as any).message?.text as string | undefined;
-    const parts = text ? text.split(/\s+/) : [];
-    usdVal = parts[1] ? Number(parts[1]) : 123;
-  }
-
-  if (isNaN(usdVal) || usdVal <= 0) {
-    await ctx.reply("Usage: /testbuy 250   (amount in USD)");
-    return;
-  }
-
-  // respect min/max filters
-  if (usdVal < settings.minBuyUsd) {
-    await ctx.reply(
-      `🚫 Test buy $${usdVal.toFixed(
-        2
-      )} is below min buy $${settings.minBuyUsd.toFixed(2)} (alert skipped).`
-    );
-    return;
-  }
-  if (settings.maxBuyUsd && usdVal > settings.maxBuyUsd) {
-    await ctx.reply(
-      `🚫 Test buy $${usdVal.toFixed(
-        2
-      )} is above max buy $${settings.maxBuyUsd.toFixed(2)} (alert skipped).`
-    );
-    return;
-  }
-
-  const emojiCount = Math.min(
-    30,
-    Math.max(1, Math.round(usdVal / settings.dollarsPerEmoji))
-  );
-  const emojiBar = settings.emoji.repeat(emojiCount);
-  const mainPairUrl = `https://dexscreener.com/${settings.chain}/${settings.pairAddress}`;
-
-  const text =
-    "🧠 <b>Premium Buy Alert (TEST)</b>\n\n" +
-    `<b>$${usdVal.toFixed(2)} BUY!</b>\n` +
-    `${emojiBar}\n\n` +
-    `🪙 <b>Token:</b> <code>${shorten(settings.tokenAddress)}</code>\n` +
-    `🧬 <b>Main pair:</b> <code>${shorten(settings.pairAddress)}</code>\n` +
-    (settings.allPairAddresses.length > 1
-      ? `🌊 <b>Total pools:</b> ${settings.allPairAddresses.length}\n`
-      : "") +
-    `📊 <a href="${mainPairUrl}">DexScreener chart</a>`;
-
-  await sendVisualAlert(ctx, settings, text);
 }
 
 /* ======================
@@ -453,10 +429,11 @@ async function runSetupStep(
     case "token": {
       const tokenAddr = text.trim();
 
-      // ✅ 8.2 – Strong EVM contract validation
+      // Strong EVM contract validation
       if (!/^0x[a-fA-F0-9]{40}$/.test(tokenAddr)) {
         await ctx.reply(
-          "❌ Invalid token address.\nPlease send a valid EVM contract (0x...).",
+          "❌ Invalid token address.\n" +
+            "Please send a valid EVM contract address in <code>0x...</code> format.",
           { parse_mode: "HTML" }
         );
         return;
@@ -464,7 +441,7 @@ async function runSetupStep(
 
       state.settings.tokenAddress = tokenAddr.toLowerCase();
 
-      // 🔍 Auto-detect chain from DexScreener before fetching pools
+      // Auto-detect chain from DexScreener before fetching pools
       if (/^0x[a-fA-F0-9]{40}$/.test(tokenAddr)) {
         try {
           const tokenUrl = `https://api.dexscreener.com/latest/dex/tokens/${tokenAddr}`;
@@ -473,13 +450,12 @@ async function runSetupStep(
 
           let pairs: any[] = Array.isArray(data.pairs) ? data.pairs : [];
 
-          // Debug – console e raw structure dekhte পারবি
           console.log(
             "DexScreener raw token response first pair:",
             JSON.stringify(pairs[0])
           );
 
-          // tokens endpoint e jodi na paoa jay, search diye fallback
+          // If tokens endpoint returns nothing, fallback to search
           if (!pairs.length) {
             const searchUrl = `https://api.dexscreener.com/latest/dex/search?q=${tokenAddr}`;
             const searchRes = await fetch(searchUrl);
@@ -503,28 +479,19 @@ async function runSetupStep(
             if (detectedChain) {
               detectedChain = String(detectedChain).toLowerCase();
 
-              // normalize common variants
               if (detectedChain === "eth") detectedChain = "ethereum";
               if (detectedChain === "bnb" || detectedChain === "bsc")
                 detectedChain = "bsc";
-              if (detectedChain === "arb") detectedChain = "arbitrum";
-              if (detectedChain === "matic") detectedChain = "polygon";
-              if (detectedChain === "avax") detectedChain = "avalanche";
+              if (detectedChain === "base") detectedChain = "base";
+              if (detectedChain === "monad") detectedChain = "monad";
             }
 
-            const supportedChains = [
-              "ethereum",
-              "bsc",
-              "base",
-              "arbitrum",
-              "polygon",
-              "avalanche"
-            ];
+            const supportedChains = ["ethereum", "bsc", "base", "monad"];
 
             if (detectedChain && supportedChains.includes(detectedChain)) {
               state.settings.chain = detectedChain as ChainId;
               await ctx.reply(
-                `🛰 <b>Detected chain:</b> <code>${detectedChain.toUpperCase()}</code>`,
+                `🛰 Detected chain: <code>${detectedChain.toUpperCase()}</code>`,
                 { parse_mode: "HTML" }
               );
             } else {
@@ -543,14 +510,17 @@ async function runSetupStep(
 
       const chain = state.settings.chain || appConfig.defaultChain;
 
-      await ctx.reply("🔎 Fetching pools.…");
+      await ctx.reply(
+        `🔎 Scanning pools on <b>${String(chain).toUpperCase()}</b>…`,
+        { parse_mode: "HTML" }
+      );
 
       const pairs = await fetchTokenPairs(chain, tokenAddr);
       if (!pairs.length) {
         state.step = "pair";
         await ctx.reply(
           "❌ No pools found for this token on DexScreener.\n\n" +
-            "2️⃣ Please send the <b>pair address</b> (DEX pool) for your token.",
+            "2️⃣ Please send your <b>pair (pool) address</b> manually.",
           { parse_mode: "HTML" }
         );
         return;
@@ -564,19 +534,19 @@ async function runSetupStep(
       (state.settings as any).allPairAddresses = allAddresses;
 
       let summary =
-        `✅ Found <b>${sorted.length}</b> pools on chain \n\n` +
-        `<b>Main pair:</b>\n<code>${main.pairAddress}</code>\n\n`;
+        `✅ Found <b>${sorted.length}</b> pools.\n\n` +
+        `🌊 <b>Main pair:</b>\n<code>${main.pairAddress}</code>\n\n`;
 
       if (sorted.length > 1) {
         const others = sorted
           .slice(1, 4)
           .map((p) => `• ${p.pairAddress}`)
           .join("\n");
-        summary += `<b>Other pools (top liq):</b>\n\n${others}\n\n`;
+        summary += `<b>Other pools (top liquidity):</b>\n${others}\n\n`;
       }
 
       await ctx.reply(
-        summary + "3️⃣ <b>Now send a buy emoji</b> (e.g. 🐶, 🧠, 🚀).",
+        summary + "3️⃣ Now send a <b>buy emoji</b> (e.g. 🐶, 🧠, 🚀).",
         {
           parse_mode: "HTML"
         }
@@ -591,7 +561,8 @@ async function runSetupStep(
       (state.settings as any).allPairAddresses = [text];
       state.step = "emoji";
       await ctx.reply(
-        "3️⃣ Choose a buy emoji (send just one emoji, e.g. 🐶 or 🧠)."
+        "3️⃣ Now send a <b>buy emoji</b> (e.g. 🐶, 🧠, 🚀).",
+        { parse_mode: "HTML" }
       );
       return;
     }
@@ -600,7 +571,8 @@ async function runSetupStep(
       state.settings.emoji = text;
       state.step = "image";
       await ctx.reply(
-        "4️⃣ Send an <b>image / gif</b> (upload) or an <b>image/gif URL</b> to show in each buy alert, or type <code>skip</code>.",
+        "4️⃣ Send an <b>image / GIF</b> (upload) or an <b>image/GIF URL</b>.\n" +
+          "If you want text-only alerts, type <code>skip</code>.",
         { parse_mode: "HTML" }
       );
       return;
@@ -610,7 +582,7 @@ async function runSetupStep(
       if (text.toLowerCase() === "skip") {
         state.step = "minBuy";
         await ctx.reply(
-          "5️⃣ Send <b>minimum $ buy</b> that will trigger an alert (e.g. 50).",
+          "5️⃣ Send the <b>minimum $ buy</b> that should trigger an alert (e.g. <code>50</code>).",
           { parse_mode: "HTML" }
         );
         return;
@@ -619,7 +591,8 @@ async function runSetupStep(
       (state.settings as any).imageUrl = text;
       state.step = "minBuy";
       await ctx.reply(
-        "🖼 Image URL saved!\n\n5️⃣ Send <b>minimum $ buy</b> that will trigger an alert (e.g. 50).",
+        "🖼 Image URL saved.\n\n" +
+          "5️⃣ Now send the <b>minimum $ buy</b> that should trigger an alert (e.g. <code>50</code>).",
         { parse_mode: "HTML" }
       );
       return;
@@ -628,14 +601,17 @@ async function runSetupStep(
     case "minBuy": {
       const val = Number(text);
       if (isNaN(val) || val < 0) {
-        await ctx.reply("Please send a valid number, e.g. 50");
+        await ctx.reply(
+          "Please send a valid number, e.g. <code>50</code>.",
+          { parse_mode: "HTML" }
+        );
         return;
       }
       state.settings.minBuyUsd = val;
       state.step = "maxBuy";
       await ctx.reply(
-        "6️⃣ (Optional) Send <b>maximum $ buy</b> to alert (e.g. 50000), or type <code>skip</code>.\n" +
-          "Useful if you don't want huge whales to spam alerts.",
+        "6️⃣ (Optional) Send a <b>maximum $ buy</b> to alert (e.g. <code>50000</code>),\n" +
+          "or type <code>skip</code> if you don't want a max limit.",
         { parse_mode: "HTML" }
       );
       return;
@@ -645,7 +621,10 @@ async function runSetupStep(
       if (text.toLowerCase() !== "skip") {
         const val = Number(text);
         if (isNaN(val) || val <= 0) {
-          await ctx.reply("Please send a positive number, or 'skip'.");
+          await ctx.reply(
+            "Please send a positive number, or <code>skip</code>.",
+            { parse_mode: "HTML" }
+          );
           return;
         }
         state.settings.maxBuyUsd = val;
@@ -653,8 +632,8 @@ async function runSetupStep(
       state.settings.cooldownSeconds ??= 3; // default cooldown if user didn't set
       state.step = "perEmoji";
       await ctx.reply(
-        "7️⃣ Send <b>$ per emoji</b> (e.g. 50 → every $50 = 1 emoji).\n\n" +
-          "Example: $200 buy with $50 per emoji → 🐶🐶🐶🐶",
+        "7️⃣ Send <b>$ per emoji</b> (e.g. <code>50</code> → every $50 = 1 emoji).\n" +
+          "Example: $200 buy with $50 per emoji → 4 emojis.",
         { parse_mode: "HTML" }
       );
       return;
@@ -663,13 +642,17 @@ async function runSetupStep(
     case "perEmoji": {
       const val = Number(text);
       if (isNaN(val) || val <= 0) {
-        await ctx.reply("Please send a positive number, e.g. 50");
+        await ctx.reply(
+          "Please send a positive number, e.g. <code>50</code>.",
+          { parse_mode: "HTML" }
+        );
         return;
       }
       state.settings.dollarsPerEmoji = val;
       state.step = "tgGroup";
       await ctx.reply(
-        "8️⃣ (Optional) Send your <b>Telegram group link</b> for better embedding, or type <code>skip</code>.",
+        "8️⃣ (Optional) Send your <b>Telegram group link</b> (e.g. <code>https://t.me/yourgroup</code>),\n" +
+          "or type <code>skip</code> to continue.",
         { parse_mode: "HTML" }
       );
       return;
@@ -697,16 +680,17 @@ async function runSetupStep(
         tgGroupLink: state.settings.tgGroupLink,
         autoPinDataPosts: state.settings.autoPinDataPosts ?? false,
         autoPinKolAlerts: state.settings.autoPinKolAlerts ?? false,
-        cooldownSeconds: state.settings.cooldownSeconds ?? 3 // ✅ default 3s per pair
+        cooldownSeconds: state.settings.cooldownSeconds ?? 3
       };
 
       const targetGroupId =
         (state as any).targetChatId || ctx.chat!.id;
       groupSettings.set(targetGroupId, finalSettings);
-      markGroupSettingsDirty(); // ✅ persist to disk via storage.ts
+      markGroupSettingsDirty(); // persist to disk via storage.ts
 
       await ctx.reply(
-        "✅ Setup complete! Buy alerts are now active in the group 🚀",
+        "✅ <b>Setup complete!</b>\n\n" +
+          "Live buy alerts are now enabled for this group 🚀",
         { parse_mode: "HTML" }
       );
 
@@ -740,54 +724,18 @@ function shorten(addr: string, len = 6): string {
   return addr.slice(0, len) + "..." + addr.slice(-len);
 }
 
-async function sendVisualAlert(ctx: Context, settings: BuyBotSettings, text: string) {
-  // priority: animation > uploaded photo > url(gif) > url(image) > plain text
-  if (settings.animationFileId) {
-    await (ctx as any).replyWithAnimation(settings.animationFileId, {
-      caption: text,
-      parse_mode: "HTML"
-    });
-    return;
-  }
-
-  if (settings.imageFileId) {
-    await (ctx as any).replyWithPhoto(settings.imageFileId, {
-      caption: text,
-      parse_mode: "HTML"
-    });
-    return;
-  }
-
-  if (settings.imageUrl) {
-    if (settings.imageUrl.toLowerCase().endsWith(".gif")) {
-      await (ctx as any).replyWithAnimation(settings.imageUrl, {
-        caption: text,
-        parse_mode: "HTML"
-      });
-    } else {
-      await (ctx as any).replyWithPhoto(settings.imageUrl, {
-        caption: text,
-        parse_mode: "HTML"
-      });
-    }
-    return;
-  }
-
-  await ctx.reply(text, { parse_mode: "HTML" });
-}
-
 async function sendGroupHelp(ctx: Context) {
   const active = groupSettings.has(ctx.chat!.id) ? "Active 🟢" : "Inactive 🔴";
 
   await ctx.reply(
-    `<b>Premium Buy Bot</b>\n\nStatus: ${active}\n\n` +
-      "Configure your token & alerts below 👇",
+    `<b>Premium Buy Bot</b>\n\n` +
+      `Status: ${active}\n\n` +
+      "Manage everything using the panel below 👇",
     {
       parse_mode: "HTML",
       reply_markup: {
         inline_keyboard: [
-          [{ text: "⚙️ Add Token", callback_data: "cmd_add" }],
-          [{ text: "🧪 Preview Alert", callback_data: "cmd_testbuy" }],
+          [{ text: "⚙️ Add / Update Token", callback_data: "cmd_add" }],
           [{ text: "🛑 Stop Alerts", callback_data: "cmd_stop" }]
         ]
       }

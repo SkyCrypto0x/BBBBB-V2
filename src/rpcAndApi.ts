@@ -11,14 +11,19 @@ export interface DexPair {
   };
 }
 
+/**
+ * Normalize DexScreener chain field → our ChainId
+ * Only effectively use: ethereum, bsc, base, monad
+ */
 function normalizeDexChain(raw: any): string | undefined {
   if (!raw) return undefined;
   let c = String(raw).toLowerCase();
+
+  // alias handling
   if (c === "eth") c = "ethereum";
   if (c === "bnb" || c === "bsc") c = "bsc";
-  if (c === "arb") c = "arbitrum";
-  if (c === "matic") c = "polygon";
-  if (c === "avax") c = "avalanche";
+
+  // "base", "monad" etc already okay as-is
   return c;
 }
 
@@ -48,6 +53,7 @@ export async function fetchTokenPairs(
 
     let pairs: any[] = Array.isArray(data.pairs) ? data.pairs : [];
 
+    // If no direct token result, fallback to search
     if (!pairs.length) {
       const searchUrl = `https://api.dexscreener.com/latest/dex/search?q=${addr}`;
       const searchRes = await fetch(searchUrl);
@@ -63,13 +69,17 @@ export async function fetchTokenPairs(
     }
 
     const result: DexPair[] = pairs
-      .filter(
-        (p: any) =>
-          normalizeDexChain(
-            p.chainId ?? p.chain?.id ?? p.chainName ?? p.chain?.name
-          ) === chain
-      )
-      .filter((p: any) => p.liquidity?.usd && p.liquidity.usd > 0)
+      .filter((p: any) => {
+        const n = normalizeDexChain(
+          p.chainId ?? p.chain?.id ?? p.chainName ?? p.chain?.name
+        );
+        return n === chain;
+      })
+      // small dust pools ছাঁটাই → কমপক্ষে $10 liq
+      .filter((p: any) => {
+        const liq = p.liquidity?.usd ?? 0;
+        return liq >= 10;
+      })
       .map((p: any) => ({
         chainId:
           (normalizeDexChain(

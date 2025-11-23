@@ -26,7 +26,7 @@ export function startLiveBuyTracker(bot: Telegraf) {
 
   // Hybrid new-pool watcher (just logs, no listeners)
   const chainsToWatch = Object.keys(appConfig.chains).filter(
-    (c): c is ChainId => appConfig.chains[c as ChainId]?.rpcUrl != null
+    (c): c is ChainId => !!appConfig.chains[c as ChainId]?.rpcUrl
   );
 
   for (const chain of chainsToWatch) {
@@ -43,7 +43,9 @@ export async function shutdownLiveBuyTracker() {
   for (const [chain, runtime] of runtimes.entries()) {
     for (const [addr, pr] of runtime.pairs.entries()) {
       try {
-        pr.contract.removeAllListeners();
+        pr.v2.removeAllListeners();
+        pr.v3?.removeAllListeners();
+        pr.v4?.removeAllListeners();
         console.log(`🧹 Removed listeners for ${chain}:${addr}`);
       } catch {
         // ignore
@@ -66,10 +68,12 @@ export async function shutdownLiveBuyTracker() {
 
 // Manual clear for /clearcache
 export async function clearLiveTrackerCaches(bot: Telegraf) {
-  for (const [chain, runtime] of runtimes.entries()) {
-    for (const [addr, pr] of runtime.pairs.entries()) {
+  for (const [, runtime] of runtimes.entries()) {
+    for (const [, pr] of runtime.pairs.entries()) {
       try {
-        pr.contract.removeAllListeners();
+        pr.v2.removeAllListeners();
+        pr.v3?.removeAllListeners();
+        pr.v4?.removeAllListeners();
       } catch {
         // ignore
       }
@@ -108,6 +112,36 @@ export async function clearLiveTrackerCaches(bot: Telegraf) {
 async function syncListeners(bot: Telegraf) {
   console.log("🔁 Syncing live listeners...");
 
+  // 0) Clean runtimes for chains removed from config
+  for (const [chain, runtime] of runtimes.entries()) {
+    if (!appConfig.chains[chain]) {
+      console.log(`🧹 Removing runtime for chain ${chain} (no longer in config)`);
+      for (const [, pr] of runtime.pairs.entries()) {
+        try {
+          pr.v2.removeAllListeners();
+          pr.v3?.removeAllListeners();
+          pr.v4?.removeAllListeners();
+        } catch {
+          // ignore
+        }
+      }
+      runtime.pairs.clear();
+      const anyProv = (runtime as ChainRuntime).provider as any;
+      if (
+        runtime.isWebSocket &&
+        anyProv._websocket &&
+        typeof anyProv._websocket.close === "function"
+      ) {
+        try {
+          anyProv._websocket.close();
+        } catch {
+          // ignore
+        }
+      }
+      runtimes.delete(chain);
+    }
+  }
+
   // 1) Auto cleanup: je pair gulo kono group-e nei, segulo remove
   const activePairAddrs = new Set<string>();
   for (const settings of groupSettings.values()) {
@@ -122,7 +156,9 @@ async function syncListeners(bot: Telegraf) {
         const pr = runtime.pairs.get(addr);
         if (pr) {
           try {
-            pr.contract.removeAllListeners();
+            pr.v2.removeAllListeners();
+            pr.v3?.removeAllListeners();
+            pr.v4?.removeAllListeners();
           } catch {
             // ignore
           }
@@ -139,7 +175,7 @@ async function syncListeners(bot: Telegraf) {
   for (const [, settings] of groupSettings.entries()) {
     const chain = settings.chain;
     const chainCfg = appConfig.chains[chain];
-    if (!chainCfg) continue;
+    if (!chainCfg || !chainCfg.rpcUrl) continue;
 
     // If no pairs yet, auto-fill top 15 highest-liq pools
     if (!settings.allPairAddresses || settings.allPairAddresses.length === 0) {
@@ -170,7 +206,7 @@ async function syncListeners(bot: Telegraf) {
   // 3) Ensure runtime per chain and attach listeners
   for (const [chain, neededPairs] of neededPairsByChain.entries()) {
     const chainCfg = appConfig.chains[chain];
-    if (!chainCfg) continue;
+    if (!chainCfg || !chainCfg.rpcUrl) continue;
 
     let runtime = runtimes.get(chain);
     if (!runtime) {
@@ -198,20 +234,25 @@ async function syncListeners(bot: Telegraf) {
           // reattach all current pairs to new provider
           for (const [addr, pr] of runtime.pairs.entries()) {
             try {
-              pr.contract.removeAllListeners();
+              pr.v2.removeAllListeners();
+              pr.v3?.removeAllListeners();
+              pr.v4?.removeAllListeners();
             } catch {
               // ignore
             }
-            const newContract = new ethers.Contract(
+
+            const newPR = attachSwapListener(
+              bot,
+              chain,
               addr,
-              PAIR_V2_ABI,
-              newProv
+              newProv,
+              {
+                token0: pr.token0,
+                token1: pr.token1
+              },
+              pr.targetToken
             );
-            pr.contract = newContract;
-            attachSwapListener(newContract, bot, chain, addr, {
-              token0: pr.token0,
-              token1: pr.token1
-            });
+            runtime.pairs.set(addr, newPR);
           }
           runtime.provider = newProv;
           console.log(
@@ -228,7 +269,9 @@ async function syncListeners(bot: Telegraf) {
       if (!neededPairs.has(addr)) {
         const pr = runtime.pairs.get(addr)!;
         try {
-          pr.contract.removeAllListeners();
+          pr.v2.removeAllListeners();
+          pr.v3?.removeAllListeners();
+          pr.v4?.removeAllListeners();
         } catch {
           // ignore
         }
@@ -246,20 +289,40 @@ async function syncListeners(bot: Telegraf) {
         continue;
       }
 
+      // figure out which token this pair belongs to (once, at attach time)
+      let targetTokenLower = "";
+      for (const s of groupSettings.values()) {
+        if (
+          s.chain === chain &&
+          s.allPairAddresses?.some(
+            (p) => p.toLowerCase() === addr.toLowerCase()
+          )
+        ) {
+          targetTokenLower = s.tokenAddress.toLowerCase();
+          break;
+        }
+      }
+      if (!targetTokenLower) {
+        console.warn(
+          `⚠️ No matching settings found for pair ${chain}:${addr}, skipping attach`
+        );
+        continue;
+      }
+
       try {
-        const contract = new ethers.Contract(
+        // temporary contract to read token0/token1 (works for v2/v3/v4 pool addresses)
+        const tmpContract = new ethers.Contract(
           addr,
           PAIR_V2_ABI,
           runtime.provider
         );
 
-        // Read real token0/token1 from pool (works for V2+V3+V4)
         let token0Lower: string;
         let token1Lower: string;
         try {
           const [t0, t1] = await Promise.all([
-            contract.token0(),
-            contract.token1()
+            tmpContract.token0(),
+            tmpContract.token1()
           ]);
           token0Lower = t0.toLowerCase();
           token1Lower = t1.toLowerCase();
@@ -271,11 +334,19 @@ async function syncListeners(bot: Telegraf) {
           continue;
         }
 
-        runtime.pairs.set(addr, {
-          contract,
-          token0: token0Lower,
-          token1: token1Lower
-        });
+        const pairRuntime = attachSwapListener(
+          bot,
+          chain,
+          addr,
+          runtime.provider,
+          {
+            token0: token0Lower,
+            token1: token1Lower
+          },
+          targetTokenLower
+        );
+
+        runtime.pairs.set(addr, pairRuntime);
 
         console.log(
           `Listening on pair ${chain}:${addr.substring(
@@ -286,11 +357,6 @@ async function syncListeners(bot: Telegraf) {
             10
           )}`
         );
-
-        attachSwapListener(contract, bot, chain, addr, {
-          token0: token0Lower,
-          token1: token1Lower
-        });
       } catch (e: any) {
         console.error(
           `Failed to attach listener to pair ${addr}:`,

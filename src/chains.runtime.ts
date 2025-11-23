@@ -24,9 +24,12 @@ export const PAIR_V4_ABI = [
 ];
 
 export interface PairRuntime {
-  contract: ethers.Contract;
+  v2: ethers.Contract;
+  v3?: ethers.Contract;
+  v4?: ethers.Contract;
   token0: string;
   token1: string;
+  targetToken: string; // track which token this pair is for
 }
 
 export interface ChainRuntime {
@@ -55,19 +58,20 @@ export function clearChainCaches() {
 // ────────────────── SWAP LISTENER ATTACH (V2+V3+V4) ──────────────────
 
 export function attachSwapListener(
-  contract: ethers.Contract,
   bot: Telegraf,
   chain: ChainId,
   addr: string,
-  tokens: { token0: string; token1: string }
-) {
-  const provider = contract.provider;
+  provider: ethers.providers.BaseProvider,
+  tokens: { token0: string; token1: string },
+  targetToken: string
+): PairRuntime {
+  const targetTokenLower = targetToken.toLowerCase();
 
-  // =============== V2 Swap Listener ===============
-  contract.on(
+  // V2
+  const v2 = new ethers.Contract(addr, PAIR_V2_ABI, provider);
+  v2.on(
     "Swap",
     (sender, amount0In, amount1In, amount0Out, amount1Out, to, event) => {
-      // This will only fire on real V2-style pairs
       handleSwap(
         bot,
         chain,
@@ -84,7 +88,7 @@ export function attachSwapListener(
     }
   );
 
-  // =============== V3 Swap Listener ===============
+  // V3
   const v3 = new ethers.Contract(addr, PAIR_V3_ABI, provider);
   v3.on(
     "Swap",
@@ -92,16 +96,26 @@ export function attachSwapListener(
       try {
         const a0 = BigInt(amount0.toString());
         const a1 = BigInt(amount1.toString());
+
+        const isToken0 = tokens.token0 === targetTokenLower;
+        const isBuy = (isToken0 && a0 < 0n) || (!isToken0 && a1 < 0n);
+        if (!isBuy) return;
+
+        const amount0In = a0 > 0n ? a0 : 0n;
+        const amount1In = a1 > 0n ? a1 : 0n;
+        const amount0Out = a0 < 0n ? -a0 : 0n;
+        const amount1Out = a1 < 0n ? -a1 : 0n;
+
         handleSwap(
           bot,
           chain,
           addr,
           tokens,
           event.transactionHash,
-          a0 > 0n ? ethers.BigNumber.from(a0) : ethers.constants.Zero,
-          a1 > 0n ? ethers.BigNumber.from(a1) : ethers.constants.Zero,
-          a0 < 0n ? ethers.BigNumber.from(-a0) : ethers.constants.Zero,
-          a1 < 0n ? ethers.BigNumber.from(-a1) : ethers.constants.Zero,
+          ethers.BigNumber.from(amount0In),
+          ethers.BigNumber.from(amount1In),
+          ethers.BigNumber.from(amount0Out),
+          ethers.BigNumber.from(amount1Out),
           recipient,
           event.blockNumber
         );
@@ -111,7 +125,7 @@ export function attachSwapListener(
     }
   );
 
-  // =============== V4 Swap Listener ===============
+  // V4
   const v4 = new ethers.Contract(addr, PAIR_V4_ABI, provider);
   v4.on(
     "Swap",
@@ -119,16 +133,26 @@ export function attachSwapListener(
       try {
         const a0 = BigInt(amount0.toString());
         const a1 = BigInt(amount1.toString());
+
+        const isToken0 = tokens.token0 === targetTokenLower;
+        const isBuy = (isToken0 && a0 < 0n) || (!isToken0 && a1 < 0n);
+        if (!isBuy) return;
+
+        const amount0In = a0 > 0n ? a0 : 0n;
+        const amount1In = a1 > 0n ? a1 : 0n;
+        const amount0Out = a0 < 0n ? -a0 : 0n;
+        const amount1Out = a1 < 0n ? -a1 : 0n;
+
         handleSwap(
           bot,
           chain,
           addr,
           tokens,
           event.transactionHash,
-          a0 > 0n ? ethers.BigNumber.from(a0) : ethers.constants.Zero,
-          a1 > 0n ? ethers.BigNumber.from(a1) : ethers.constants.Zero,
-          a0 < 0n ? ethers.BigNumber.from(-a0) : ethers.constants.Zero,
-          a1 < 0n ? ethers.BigNumber.from(-a1) : ethers.constants.Zero,
+          ethers.BigNumber.from(amount0In),
+          ethers.BigNumber.from(amount1In),
+          ethers.BigNumber.from(amount0Out),
+          ethers.BigNumber.from(amount1Out),
           recipient,
           event.blockNumber
         );
@@ -137,6 +161,15 @@ export function attachSwapListener(
       }
     }
   );
+
+  return {
+    v2,
+    v3,
+    v4,
+    token0: tokens.token0,
+    token1: tokens.token1,
+    targetToken: targetTokenLower
+  };
 }
 
 // ────────────────── SWAP HANDLER ──────────────────
@@ -335,8 +368,6 @@ export function getChainIdNumber(chain: ChainId): number | undefined {
     ethereum: 1,
     bsc: 56,
     base: 8453,
-    arbitrum: 42161,
-    polygon: 137,
     monad: 131316155
   };
   const key = chain.toLowerCase();
@@ -365,8 +396,7 @@ export async function getAllValidPairs(
         const isCorrectChain =
           apiChainId === targetChain ||
           apiChainName === targetChain ||
-          (numericId !== undefined &&
-            apiChainId === String(numericId));
+          (numericId !== undefined && apiChainId === String(numericId));
 
         const tokenAddrLower = tokenAddress.toLowerCase();
         const baseAddr = p.baseToken?.address?.toLowerCase();
@@ -377,7 +407,6 @@ export async function getAllValidPairs(
 
         return isCorrectChain && tokenMatch;
       })
-      // 🔥 UPDATED FILTER: allow null liquidity (treat as 0), min $10
       .filter((p: any) => {
         const liq = p.liquidity?.usd ?? 0;
         return liq >= 10;
@@ -463,14 +492,14 @@ export async function getPreviousBalance(
 export async function scanNewPoolsLoop(chain: ChainId) {
   console.log(`🚀 Starting hybrid new-pool watcher for ${chain}...`);
 
-  const POLL_INTERVAL_MS = 10_000;
+  const POLL_INTERVAL_MS = 30_000;
 
   while (true) {
     try {
       const pairs: SimplePairInfo[] = await getNewPairsHybrid(
         chain,
-        5000, // min liquidity USD
-        600 // max age 10 min
+        5000,
+        600
       );
 
       if (pairs.length > 0) {

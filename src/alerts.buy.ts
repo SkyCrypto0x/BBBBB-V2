@@ -136,7 +136,9 @@ export async function sendPremiumBuyAlert(
   );
   const emojiBar = settings.emoji.repeat(Math.min(50, emojiCount));
 
-  const mcText = marketCap > 0 ? (marketCap / 1_000_000).toFixed(2) : "0.00";
+  // 🔥 MC compact format: 620K / 75.4M etc.
+  const mcText =
+    marketCap > 0 ? formatCompactUsd(marketCap) : "0";
 
   // 🔥 LP = এই buy যেই pair থেকে এসেছে, সেইটার LP
   const mainPairLp = pairLiquidityUsd || 0;
@@ -174,6 +176,12 @@ export async function sendPremiumBuyAlert(
 
   const dexToolsUrl = `https://www.dextools.io/app/${dextoolsNetwork}/pair-explorer/${pairAddress}`;
 
+  // configurable links (fallback old defaults)
+  const trendingUrl =
+    appConfig.trendingChannelUrl || "https://t.me/trending";
+  const adsContactUrl =
+    appConfig.adsContactUrl || "https://t.me/yourusername";
+
   const message = `
 ${headerLine}
 ${whaleLoadLine}
@@ -193,10 +201,10 @@ ${
   positionIncrease !== null
     ? `🧠 <b>Position Increased: +${positionIncrease.toFixed(0)}%</b>\n`
     : ""
-}📊 MC: $${mcText}M
+}📊 MC: $${mcText}
 ${volumeLine}
 
-🔗 <a href="${dexToolsUrl}">DexT</a> | <a href="${dexScreenerUrl}">DexS</a> | <a href="https://t.me/trending">Trending</a>
+🔗 <a href="${dexToolsUrl}">DexT</a> | <a href="${dexScreenerUrl}">DexS</a> | <a href="${trendingUrl}">Trending</a>
 `.trim();
 
   const row: any[] = [];
@@ -210,7 +218,7 @@ ${volumeLine}
 
   row.push({
     text: "✉️ DM for Ads",
-    url: "https://t.me/yourusername"
+    url: adsContactUrl
   });
 
   const keyboard: any = {
