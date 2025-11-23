@@ -45,6 +45,22 @@ const chains: Record<ChainId, ChainConfig> = {
       process.env.ETH_EXPLORER ||
       rawJson.chains?.ethereum?.explorer ||
       "https://etherscan.io"
+  },
+  base: {
+    rpcUrl:
+      process.env.BASE_RPC_URL || rawJson.chains?.base?.rpcUrl || "",
+    explorer:
+      process.env.BASE_EXPLORER ||
+      rawJson.chains?.base?.explorer ||
+      "https://basescan.org"
+  },
+  monad: {
+    rpcUrl:
+      process.env.MONAD_RPC_URL || rawJson.chains?.monad?.rpcUrl || "",
+    explorer:
+      process.env.MONAD_EXPLORER ||
+      rawJson.chains?.monad?.explorer ||
+      "https://testnet.monadscan.com"
   }
   // চাইলে এখানে base, arb ইত্যাদি add করবি
 };
