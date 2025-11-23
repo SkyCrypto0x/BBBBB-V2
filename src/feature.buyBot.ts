@@ -177,7 +177,7 @@ export function registerBuyBotFeature(bot: Telegraf<BotCtx>) {
         "🕵️ <b>Premium Buy Bot</b>\n\n" +
           "🔥 Live buy alerts for your token.\n\n" +
           "• Multi-chain (ETH / BSC / BASE / MONAD)\n" +
-          "• DexScreener pools auto-detect\n" +
+          "• All Pools auto-detect\n" +
           "• Min / Max buy filter\n" +
           "• Custom emoji + GIF / image\n\n" +
           "🚀 To get started:\n" +
@@ -576,7 +576,7 @@ async function runSetupStep(
       if (!pairs.length) {
         state.step = "pair";
         await ctx.reply(
-          "❌ No pools found for this token on DexScreener.\n\n" +
+          "❌ No pools found for this token.\n\n" +
             "2️⃣ Please send your <b>pair (pool) address</b> manually.",
           { parse_mode: "HTML" }
         );

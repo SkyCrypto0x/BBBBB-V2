@@ -430,7 +430,7 @@ export function getChainIdNumber(chain: ChainId): number | undefined {
     ethereum: 1,
     bsc: 56,
     base: 8453,
-    monad: 131316155
+    monad: 143
   };
   const key = chain.toLowerCase();
   return map[key];

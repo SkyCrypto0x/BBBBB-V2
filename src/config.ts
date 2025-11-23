@@ -91,7 +91,7 @@ const chains: Record<ChainId, ChainConfig> = {
     explorer:
       process.env.MONAD_EXPLORER ||
       rawJson.chains?.monad?.explorer ||
-      "https://testnet.monadscan.com"
+      "https://monadvision.com"
   }
 };
 
