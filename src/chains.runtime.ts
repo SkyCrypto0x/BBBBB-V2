@@ -268,7 +268,16 @@ async function handleSwap(
         `https://api.dexscreener.com/latest/dex/pairs/${chain}/${pairAddress}`
       );
       const data: any = await res.json();
-      pairData = data?.pair || null;
+
+      // ✅ FIX: support new Dexscreener schema { pairs: [...] } and old { pair: {...} }
+      const pairsArr = Array.isArray(data?.pairs)
+        ? data.pairs
+        : data?.pair
+        ? [data.pair]
+        : [];
+
+      pairData = pairsArr[0] || null;
+
       pairInfoCache.set(pairKey, { value: pairData, ts: now });
     } catch (e) {
       console.error("DexScreener fetch failed:", e);
