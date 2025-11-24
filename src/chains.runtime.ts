@@ -373,7 +373,7 @@ async function handleSwap(
     maximumFractionDigits: rawTokenAmount < 1 ? 6 : 0
   });
 
-  const nativePriceUsd = await getNativePrice(chain);
+    const nativePriceUsd = await getNativePrice(chain);
   const usdValue = baseAmount * nativePriceUsd;
 
   const MIN_POSITION_USD = 100;
@@ -381,22 +381,46 @@ async function handleSwap(
   const buyer = ethers.utils.getAddress(to);
 
   if (usdValue >= MIN_POSITION_USD) {
-    const prevBalance = await getPreviousBalance(
-      chain,
-      settings.tokenAddress,
-      buyer,
-      blockNumber - 1
-    );
-    const currentBalance = prevBalance + tokenOut.toBigInt();
+    try {
+      const prevBalance = await getPreviousBalance(
+        chain,
+        settings.tokenAddress,
+        buyer,
+        blockNumber - 1
+      );
 
-    if (prevBalance > 0n) {
-      const diff = currentBalance - prevBalance;
-      const increase = Number((diff * 1000n) / prevBalance) / 10;
-      positionIncrease = Math.round(increase);
+      // প্রথমবার কিনলে (আগে কিছুই ছিল না) → কোনো line দেখাবো না
+      if (prevBalance > 0n) {
+        // এই trade-এ buyer যত token পেল
+        const thisBuyAmount = tokenOut.toBigInt();
+
+        // % * 10 = (thisBuy / prevBalance) * 1000
+        const increaseTimes10 = (thisBuyAmount * 1000n) / prevBalance;
+
+        // খুব অস্বাভাবিক (ধরা যাক 1,000,000% এর বেশি) হলে skip করব
+        const MAX_PERCENT_TIMES10 = 1_000_000n * 10n; // 1M%
+        if (increaseTimes10 <= MAX_PERCENT_TIMES10) {
+          const rawIncrease = Number(increaseTimes10) / 10; // e.g. 57 → 5.7
+
+          if (Number.isFinite(rawIncrease) && rawIncrease > 0) {
+            // 5.4 → 5%, 5.6 → 6%
+            positionIncrease = Math.round(rawIncrease);
+          }
+        } else {
+          positionIncrease = null; // অস্বাভাবিক বড় হলে line না দেখানোই safe
+        }
+      } else {
+        // prevBalance === 0n → first buy → কোনো Position Increased না
+        positionIncrease = null;
+      }
+    } catch {
+      // কোনো error হলে line skip করা safest
+      positionIncrease = null;
     }
   }
 
   const tokenAmount = rawTokenAmount;
+
 
   for (const [groupId, s] of relatedGroups) {
     const alertData: PremiumAlertData = {
